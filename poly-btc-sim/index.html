@@ -80,6 +80,17 @@
                     </div>
                 </div>
 
+                <div class="chart-section">
+                    <div class="chart-header">
+                        <h3>Live Odds Chart</h3>
+                        <span class="chart-legend">
+                            <span class="legend-item"><span class="legend-dot up"></span>UP %</span>
+                            <span class="legend-item"><span class="legend-dot btc"></span>BTC %</span>
+                        </span>
+                    </div>
+                    <canvas id="odds-chart" width="800" height="200"></canvas>
+                </div>
+
                 <div class="trading-panel">
                     <div class="trade-tabs">
                         <button class="trade-tab active" data-side="up" id="tab-up">Buy UP &#9650;</button>
@@ -111,7 +122,7 @@
                 </div>
 
                 <div class="positions-section" id="positions-section" style="display:none;">
-                    <h3>Your Positions (Paper)</h3>
+                    <h3>Your Positions (Click SELL anytime to cash out)</h3>
                     <div class="positions-list" id="positions-list"></div>
                 </div>
             </div>

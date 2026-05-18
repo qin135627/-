@@ -46,6 +46,8 @@ const state = {
     priceTimer: null,
     countdownTimer: null,
     searchTimer: null,
+    priceHistory: [],   // [{t, polyUp, btcPct}] for chart
+    chartInterval: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -268,7 +270,134 @@ async function refreshOdds() {
         state.priceNo = 1 - price;
         renderOdds();
         renderTradeSummary();
+        renderPositions(); // unrealized PnL changes
+        recordHistorySample();
     }
+}
+
+// ============ CHART ============
+function recordHistorySample() {
+    if (!state.marketActive || !state.marketStartTime || !state.marketEndTime) return;
+    const now = Date.now();
+    if (now < state.marketStartTime || now > state.marketEndTime) return;
+
+    const elapsed = (now - state.marketStartTime) / (state.marketEndTime - state.marketStartTime);
+    if (elapsed < 0 || elapsed > 1) return;
+
+    // BTC price as % change relative to start (mapped to 0-1 around 0.5)
+    let btcPct = 0.5;
+    if (state.btcStartPrice && state.btcPrice) {
+        const pct = (state.btcPrice - state.btcStartPrice) / state.btcStartPrice;
+        // Map ±0.5% to full 0-1 range, centered at 0.5
+        btcPct = 0.5 + Math.max(-0.5, Math.min(0.5, pct * 100));
+    }
+
+    const sample = { t: elapsed, polyUp: state.priceYes, btcPct };
+    // Avoid duplicate consecutive samples (keep <= 300 points)
+    const last = state.priceHistory[state.priceHistory.length - 1];
+    if (!last || Math.abs(last.t - sample.t) > 0.001) {
+        state.priceHistory.push(sample);
+        if (state.priceHistory.length > 300) state.priceHistory.shift();
+    }
+    drawChart();
+}
+
+function drawChart() {
+    const canvas = $('odds-chart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    // Setup canvas size for crisp rendering
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth || 800;
+    const cssH = canvas.clientHeight || 200;
+    if (canvas.width !== cssW * dpr || canvas.height !== cssH * dpr) {
+        canvas.width = cssW * dpr;
+        canvas.height = cssH * dpr;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const W = cssW;
+    const H = cssH;
+    const padX = 8;
+    const padY = 12;
+
+    // Clear
+    ctx.fillStyle = '#0d0d0f';
+    ctx.fillRect(0, 0, W, H);
+
+    // Grid lines (50% line)
+    ctx.strokeStyle = '#2d2d35';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    [0.25, 0.5, 0.75].forEach(y => {
+        const py = padY + (1 - y) * (H - 2 * padY);
+        ctx.beginPath();
+        ctx.moveTo(padX, py);
+        ctx.lineTo(W - padX, py);
+        ctx.stroke();
+    });
+    ctx.setLineDash([]);
+
+    // 50% label
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('50%', padX + 4, padY + (1 - 0.5) * (H - 2 * padY) - 2);
+
+    if (state.priceHistory.length < 2) return;
+
+    const xy = (t, v) => [
+        padX + t * (W - 2 * padX),
+        padY + (1 - Math.max(0, Math.min(1, v))) * (H - 2 * padY)
+    ];
+
+    // BTC line (orange) - draw first (behind)
+    ctx.strokeStyle = '#f7931a';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    state.priceHistory.forEach((s, i) => {
+        const [x, y] = xy(s.t, s.btcPct);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Poly UP line (green) with gradient fill
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, 'rgba(34, 197, 94, 0.3)');
+    grad.addColorStop(1, 'rgba(34, 197, 94, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    const first = xy(state.priceHistory[0].t, state.priceHistory[0].polyUp);
+    ctx.moveTo(first[0], H - padY);
+    ctx.lineTo(first[0], first[1]);
+    state.priceHistory.forEach(s => {
+        const [x, y] = xy(s.t, s.polyUp);
+        ctx.lineTo(x, y);
+    });
+    const last = xy(state.priceHistory[state.priceHistory.length - 1].t, state.priceHistory[state.priceHistory.length - 1].polyUp);
+    ctx.lineTo(last[0], H - padY);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = '#22c55e';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    state.priceHistory.forEach((s, i) => {
+        const [x, y] = xy(s.t, s.polyUp);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Current point dots
+    const lastSample = state.priceHistory[state.priceHistory.length - 1];
+    const [px, py] = xy(lastSample.t, lastSample.polyUp);
+    ctx.fillStyle = '#22c55e';
+    ctx.beginPath();
+    ctx.arc(px, py, 3, 0, Math.PI * 2);
+    ctx.fill();
 }
 
 // ============ BTC PRICE ============
@@ -282,6 +411,7 @@ async function fetchBtcPrice() {
             const data = await resp.json();
             state.btcPrice = parseFloat(data.price);
             renderBtcPrice();
+            recordHistorySample();
             return;
         }
     } catch (e) {}
@@ -294,6 +424,7 @@ async function fetchBtcPrice() {
             const data = await resp.json();
             state.btcPrice = data.bitcoin.usd;
             renderBtcPrice();
+            recordHistorySample();
         }
     } catch (e) {}
 }
@@ -328,6 +459,7 @@ function connectToMarket(md) {
     state.marketActive = true;
     state.priceYes = md.priceYes !== null ? md.priceYes : 0.5;
     state.priceNo = md.priceNo !== null ? md.priceNo : 0.5;
+    state.priceHistory = [];
 
     fetchBtcPrice().then(() => {
         state.btcStartPrice = state.btcPrice;
@@ -339,6 +471,7 @@ function connectToMarket(md) {
     renderOdds();
     renderBalance();
     renderPositions();
+    drawChart();
 
     showToast(`Connected: ${md.question}`, 'success');
 
@@ -347,6 +480,8 @@ function connectToMarket(md) {
     state.countdownTimer = setInterval(() => {
         const remaining = Math.max(0, Math.floor((state.marketEndTime - Date.now()) / 1000));
         renderCountdown(remaining);
+        recordHistorySample();
+        renderPositions(); // update unrealized PnL display
         if (remaining <= 0) resolveMarket();
     }, 1000);
 
@@ -411,11 +546,52 @@ function placeTrade() {
     const shares = amount / price;
 
     state.balance -= amount;
-    state.positions.push({ side, shares, price, cost: amount, timestamp: Date.now() });
+    state.positions.push({
+        id: Date.now() + '-' + Math.floor(Math.random() * 10000),
+        side, shares, price, cost: amount, timestamp: Date.now(),
+    });
 
     renderBalance();
     renderPositions();
     showToast(`Bought ${shares.toFixed(2)} ${side.toUpperCase()} @ $${price.toFixed(3)}`, 'success');
+}
+
+// Sell a position at current Polymarket midpoint price
+function sellPosition(positionId) {
+    const idx = state.positions.findIndex(p => p.id === positionId);
+    if (idx === -1) return;
+    const pos = state.positions[idx];
+
+    if (state.priceYes === null) return showToast('Waiting for price data...', 'error');
+
+    // Sell price = current midpoint of the side held
+    const sellPrice = pos.side === 'up' ? state.priceYes : state.priceNo;
+    const proceeds = pos.shares * sellPrice;
+    const pnl = proceeds - pos.cost;
+
+    state.balance += proceeds;
+    state.positions.splice(idx, 1);
+
+    // Track in history as a closed trade (won = profit > 0)
+    state.history.push({
+        side: pos.side, cost: pos.cost, shares: pos.shares,
+        price: pos.price, sellPrice, pnl,
+        won: pnl > 0, outcome: 'sold', sold: true,
+        timestamp: Date.now(), question: state.question,
+    });
+    state.totalTrades++;
+    if (pnl > 0) state.wins++;
+    state.totalPnl += pnl;
+    if (pnl > state.bestTrade) state.bestTrade = pnl;
+
+    renderBalance();
+    renderPositions();
+    renderHistory();
+    renderStats();
+
+    const sign = pnl >= 0 ? '+' : '';
+    showToast(`Sold ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)}, P&L: ${sign}$${pnl.toFixed(2)}`,
+        pnl >= 0 ? 'success' : 'error');
 }
 
 // ============ RENDERING ============
@@ -539,15 +715,46 @@ function renderPositions() {
     const list = $('positions-list');
     if (state.positions.length === 0) { section.style.display = 'none'; return; }
     section.style.display = 'block';
-    list.innerHTML = state.positions.map(pos => `
-        <div class="position-item">
-            <div><span class="position-side ${pos.side}">${pos.side === 'up' ? '&#9650; UP' : '&#9660; DOWN'}</span></div>
-            <div class="position-details">
-                <div class="position-shares">${pos.shares.toFixed(2)} shares</div>
-                <div class="position-cost">$${pos.cost.toFixed(2)} @ $${pos.price.toFixed(3)}</div>
+    list.innerHTML = state.positions.map(pos => {
+        const currentPrice = pos.side === 'up' ? state.priceYes : state.priceNo;
+        const currentValue = currentPrice !== null ? pos.shares * currentPrice : pos.cost;
+        const unrealizedPnl = currentValue - pos.cost;
+        const pnlPct = (unrealizedPnl / pos.cost) * 100;
+        const sign = unrealizedPnl >= 0 ? '+' : '';
+        const pnlClass = unrealizedPnl >= 0 ? 'profit' : 'loss';
+        const sideLabel = pos.side === 'up' ? '&#9650; UP' : '&#9660; DOWN';
+        return `
+            <div class="position-item">
+                <span class="position-side-badge ${pos.side}">${sideLabel}</span>
+                <div class="position-info">
+                    <div class="position-info-row">
+                        <span>Shares</span>
+                        <span>${pos.shares.toFixed(2)} @ $${pos.price.toFixed(3)}</span>
+                    </div>
+                    <div class="position-info-row">
+                        <span>Cost</span>
+                        <span>$${pos.cost.toFixed(2)}</span>
+                    </div>
+                    <div class="position-info-row">
+                        <span>Now</span>
+                        <span>$${currentValue.toFixed(2)} @ $${(currentPrice !== null ? currentPrice : 0).toFixed(3)}</span>
+                    </div>
+                    <div class="position-info-row pnl ${pnlClass}">
+                        <span>P&L</span>
+                        <span>${sign}$${unrealizedPnl.toFixed(2)} (${sign}${pnlPct.toFixed(1)}%)</span>
+                    </div>
+                </div>
+                <button class="sell-btn" data-position-id="${pos.id}" ${state.priceYes === null ? 'disabled' : ''}>
+                    SELL<br><span style="font-size:10px;font-weight:400;">$${currentValue.toFixed(2)}</span>
+                </button>
             </div>
-        </div>
-    `).join('');
+        `;
+    }).join('');
+
+    // Attach sell handlers
+    list.querySelectorAll('.sell-btn').forEach(btn => {
+        btn.addEventListener('click', () => sellPosition(btn.dataset.positionId));
+    });
 }
 
 function renderHistory() {
@@ -556,15 +763,19 @@ function renderHistory() {
         list.innerHTML = '<div class="history-empty">No trades yet.</div>';
         return;
     }
-    list.innerHTML = state.history.slice(-20).reverse().map(t => `
+    list.innerHTML = state.history.slice(-20).reverse().map(t => {
+        const sideLabel = t.side === 'up' ? '&#9650; UP' : '&#9660; DOWN';
+        const tag = t.sold ? '<span style="color:var(--accent); margin-left:6px; font-size:10px;">SOLD</span>' : '';
+        return `
         <div class="history-item ${t.won ? 'win' : 'loss'}">
             <div>
-                <span class="history-side">${t.side === 'up' ? '&#9650; UP' : '&#9660; DOWN'}</span>
+                <span class="history-side">${sideLabel}</span>${tag}
                 <span style="color:var(--text-muted); margin-left:8px; font-size:11px;">$${t.cost.toFixed(0)}</span>
             </div>
             <span class="history-pnl">${t.won ? '+' : ''}$${t.pnl.toFixed(2)}</span>
         </div>
-    `).join('');
+    `;
+    }).join('');
 }
 
 function renderStats() {
@@ -654,6 +865,8 @@ async function init() {
     renderTradeSummary();
     renderHistory();
     renderStats();
+    drawChart();
+    window.addEventListener('resize', drawChart);
     showToast('Connecting to Polymarket...', 'info');
     await searchAndConnect();
 }
