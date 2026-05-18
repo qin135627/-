@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BTC 5min Prediction - Polymarket Style</title>
+    <title>BTC 5min Prediction - Polymarket Live</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -13,7 +13,7 @@
             <div class="header-left">
                 <div class="logo">
                     <span class="logo-icon">&#9671;</span>
-                    <span class="logo-text">PolyBTC Sim</span>
+                    <span class="logo-text">PolyBTC Live</span>
                 </div>
             </div>
             <div class="header-right">
@@ -32,10 +32,13 @@
                     <div class="market-tag">
                         <span class="tag crypto">Crypto</span>
                         <span class="tag btc">Bitcoin</span>
-                        <span class="tag live" id="market-status-tag">LIVE</span>
+                        <span class="tag live" id="market-status-tag">CONNECTING</span>
                     </div>
                     <h1 class="market-title" id="market-title">BTC Up or Down - 5 Minutes</h1>
-                    <p class="market-desc">This market resolves to "Up" if Bitcoin price at the end of 5 minutes is greater than or equal to the starting price. Otherwise, it resolves to "Down".</p>
+                    <p class="market-desc">
+                        Resolves to "Up" if BTC price at end of 5 minutes &ge; starting price. Otherwise "Down".
+                        <a href="#" id="market-link" target="_blank" rel="noopener" style="display:none; margin-left:8px; color:var(--accent);">View on Polymarket &rarr;</a>
+                    </p>
                 </div>
 
                 <!-- BTC Price Display -->
@@ -120,7 +123,7 @@
                                 <span id="potential-profit">+$10.00 (100%)</span>
                             </div>
                         </div>
-                        <button class="trade-btn" id="place-trade-btn">Place Trade</button>
+                        <button class="trade-btn" id="place-trade-btn" disabled>Place Trade</button>
                     </div>
                 </div>
 
