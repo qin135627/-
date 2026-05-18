@@ -74,15 +74,103 @@ const $ = (id) => document.getElementById(id);
 // ============ GAMMA API: FIND ACTIVE BTC 5M MARKET ============
 async function findActiveMarket() {
     try {
-        // Query Gamma API for active BTC 5-minute markets
-        const url = `${CONFIG.GAMMA_API}/events?slug_contains=btc-updown-5m&active=true&closed=false&limit=10&order=endDate&ascending=true`;
-        const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
+        // Try multiple query strategies to find active BTC 5m market
+        let events = [];
 
-        if (!resp.ok) {
-            throw new Error(`Gamma API returned ${resp.status}`);
+        // Strategy 1: events endpoint with slug_contains
+        const urls = [
+            `${CONFIG.GAMMA_API}/events?slug_contains=btc-updown-5m&active=true&closed=false&limit=10`,
+            `${CONFIG.GAMMA_API}/events?tag=crypto&active=true&closed=false&limit=50`,
+        ];
+
+        for (const url of urls) {
+            try {
+                console.log('[PolyBTC] Trying:', url);
+                const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
+                if (!resp.ok) {
+                    console.log('[PolyBTC] Response:', resp.status);
+                    continue;
+                }
+                const data = await resp.json();
+                console.log('[PolyBTC] Got', data.length, 'events');
+                
+                // Filter for btc-updown-5m
+                const filtered = data.filter(e => e.slug && e.slug.includes('btc-updown-5m'));
+                console.log('[PolyBTC] BTC 5m events found:', filtered.length, filtered.map(e => e.slug));
+                
+                if (filtered.length > 0) {
+                    events = filtered;
+                    break;
+                }
+                if (data.length > 0 && events.length === 0) {
+                    events = data.filter(e => e.slug && e.slug.includes('btc-updown-5m'));
+                }
+            } catch (e) {
+                console.log('[PolyBTC] Fetch error:', e.message);
+            }
         }
 
-        const events = await resp.json();
+        // Strategy 2: Try markets endpoint directly if events didn't work
+        if (events.length === 0) {
+            console.log('[PolyBTC] Trying markets endpoint...');
+            try {
+                const resp = await fetch(
+                    `${CONFIG.GAMMA_API}/markets?active=true&closed=false&limit=50`,
+                    { signal: AbortSignal.timeout(10000) }
+                );
+                if (resp.ok) {
+                    const markets = await resp.json();
+                    console.log('[PolyBTC] Got', markets.length, 'markets');
+                    const btcMarkets = markets.filter(m => 
+                        (m.slug && m.slug.includes('btc-updown-5m')) ||
+                        (m.question && m.question.toLowerCase().includes('btc') && m.question.includes('5'))
+                    );
+                    console.log('[PolyBTC] BTC 5m markets:', btcMarkets.length, btcMarkets.map(m => m.slug || m.question));
+                    
+                    if (btcMarkets.length > 0) {
+                        // Convert market to event-like structure
+                        const market = btcMarkets[0];
+                        const endTime = new Date(market.endDate).getTime();
+                        const slugParts = (market.slug || '').split('-');
+                        const startUnix = parseInt(slugParts[slugParts.length - 1]);
+                        const startTime = isNaN(startUnix) ? endTime - 300000 : startUnix * 1000;
+
+                        let tokenIds = null;
+                        if (market.clobTokenIds) {
+                            try { tokenIds = JSON.parse(market.clobTokenIds); } catch(e) {}
+                        }
+                        let prices = null;
+                        if (market.outcomePrices) {
+                            try { prices = JSON.parse(market.outcomePrices); } catch(e) {}
+                        }
+
+                        console.log('[PolyBTC] Using market:', market.slug, 'tokens:', tokenIds, 'prices:', prices);
+                        return {
+                            event: null,
+                            market,
+                            slug: market.slug || market.groupItemTitle,
+                            question: market.question,
+                            startTime,
+                            endTime,
+                            tokenIdYes: tokenIds ? tokenIds[0] : null,
+                            tokenIdNo: tokenIds ? tokenIds[1] : null,
+                            priceYes: prices ? parseFloat(prices[0]) : null,
+                            priceNo: prices ? parseFloat(prices[1]) : null,
+                            volume: parseFloat(market.volume || 0),
+                            conditionId: market.conditionId || null,
+                        };
+                    }
+                }
+            } catch (e) {
+                console.log('[PolyBTC] Markets endpoint error:', e.message);
+            }
+        }
+
+        if (events.length === 0) {
+            console.log('[PolyBTC] No BTC 5m markets found via any strategy');
+            return null;
+        }
+
         const now = Date.now();
 
         // Find the currently ACTIVE market (started but not yet ended)
@@ -100,8 +188,8 @@ async function findActiveMarket() {
             if (isNaN(startUnix)) continue;
             const startTime = startUnix * 1000;
 
-            // Must have started already
-            if (startTime > now) continue;
+            // Accept if hasn't ended yet (even if not started, we'll show countdown)
+            // Previously we skipped if startTime > now, but let's be more lenient
 
             // Parse token IDs
             let tokenIds = null;
@@ -114,6 +202,8 @@ async function findActiveMarket() {
             if (market.outcomePrices) {
                 try { prices = JSON.parse(market.outcomePrices); } catch(e) {}
             }
+
+            console.log('[PolyBTC] Found active event:', event.slug, 'end:', new Date(endTime).toISOString(), 'start:', new Date(startTime).toISOString());
 
             return {
                 event,
