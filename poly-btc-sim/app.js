@@ -93,10 +93,15 @@ async function findActiveMarket() {
                 }
                 const data = await resp.json();
                 console.log('[PolyBTC] Got', data.length, 'events');
+                // Log ALL slugs so we can see what's available
+                console.log('[PolyBTC] All event slugs:', data.map(e => e.slug));
                 
-                // Filter for btc-updown-5m
-                const filtered = data.filter(e => e.slug && e.slug.includes('btc-updown-5m'));
-                console.log('[PolyBTC] BTC 5m events found:', filtered.length, filtered.map(e => e.slug));
+                // Filter for btc-updown-5m (try multiple patterns)
+                const filtered = data.filter(e => 
+                    (e.slug && (e.slug.includes('btc-updown-5m') || e.slug.includes('btc-up-down-5m') || e.slug.includes('bitcoin-5m'))) ||
+                    (e.title && e.title.includes('5') && e.title.toLowerCase().includes('btc'))
+                );
+                console.log('[PolyBTC] BTC 5m events found:', filtered.length, filtered.map(e => e.slug || e.title));
                 
                 if (filtered.length > 0) {
                     events = filtered;
@@ -121,9 +126,11 @@ async function findActiveMarket() {
                 if (resp.ok) {
                     const markets = await resp.json();
                     console.log('[PolyBTC] Got', markets.length, 'markets');
+                    // Log all market slugs/questions
+                    console.log('[PolyBTC] All market slugs:', markets.slice(0, 10).map(m => m.slug || m.question));
                     const btcMarkets = markets.filter(m => 
-                        (m.slug && m.slug.includes('btc-updown-5m')) ||
-                        (m.question && m.question.toLowerCase().includes('btc') && m.question.includes('5'))
+                        (m.slug && (m.slug.includes('btc-updown-5m') || m.slug.includes('btc-up-down-5m') || m.slug.includes('bitcoin-5m'))) ||
+                        (m.question && m.question.toLowerCase().includes('btc') && (m.question.includes('5') || m.question.toLowerCase().includes('minute')))
                     );
                     console.log('[PolyBTC] BTC 5m markets:', btcMarkets.length, btcMarkets.map(m => m.slug || m.question));
                     
