@@ -1,16 +1,11 @@
 /**
  * PolyBTC - Polymarket BTC 5-Minute Market Mirror + Paper Trading
- * 
- * This app is a STRICT mirror of live Polymarket data:
- * - All odds come directly from Polymarket APIs (Gamma + CLOB)
- * - Countdown syncs to the REAL market end time
- * - No simulation, no fake odds - if API is unavailable, shows "waiting"
- * - Paper trading only (fake money, real data)
- * 
- * APIs used:
- * - Gamma API (https://gamma-api.polymarket.com): Market discovery
- * - CLOB API (https://clob.polymarket.com): Real-time midpoint pricing
- * - Binance API: Real BTC price reference
+ *
+ * Strategy: Polymarket's BTC 5-minute markets follow a strict pattern:
+ *   slug: btc-updown-5m-{unix_timestamp_aligned_to_5min_boundary}
+ *
+ * We compute the expected slug from the current time and query directly,
+ * which is far more reliable than searching events/markets endpoints.
  */
 
 // ============ CONFIG ============
@@ -18,14 +13,13 @@ const CONFIG = {
     GAMMA_API: 'https://gamma-api.polymarket.com',
     CLOB_API: 'https://clob.polymarket.com',
     BINANCE_API: 'https://api.binance.com/api/v3',
-    REFRESH_ODDS_MS: 3000,       // Refresh odds every 3 seconds
-    REFRESH_PRICE_MS: 2000,      // Refresh BTC price every 2 seconds
-    SEARCH_MARKET_MS: 5000,      // Search for new market every 5 seconds when waiting
+    REFRESH_ODDS_MS: 2000,
+    REFRESH_PRICE_MS: 2000,
+    SEARCH_RETRY_MS: 5000,
 };
 
 // ============ STATE ============
 const state = {
-    // Paper trading
     balance: 1000,
     positions: [],
     history: [],
@@ -33,251 +27,210 @@ const state = {
     wins: 0,
     totalPnl: 0,
     bestTrade: 0,
-
-    // Live Polymarket data (strict - no simulation)
-    market: null,              // Full market object from Gamma API
-    slug: null,                // e.g. "btc-updown-5m-1778895000"
-    conditionId: null,
-    tokenIdYes: null,          // CLOB token for "Up" (Yes outcome)
-    tokenIdNo: null,           // CLOB token for "Down" (No outcome)
-    marketEndTime: null,       // Real end time from Polymarket
-    marketStartTime: null,     // Derived from slug timestamp
-    question: null,            // Market question text
-
-    // Live prices from Polymarket CLOB
-    priceYes: null,            // Up price (0-1)
-    priceNo: null,             // Down price (0-1)
-    
-    // BTC price from Binance
+    market: null,
+    slug: null,
+    tokenIdYes: null,
+    tokenIdNo: null,
+    marketEndTime: null,
+    marketStartTime: null,
+    question: null,
+    priceYes: null,
+    priceNo: null,
     btcPrice: null,
-    btcStartPrice: null,       // BTC price at market start
-
-    // UI
+    btcStartPrice: null,
     currentSide: 'up',
     marketActive: false,
     volume: 0,
-
-    // Status
-    status: 'searching',       // 'searching' | 'live' | 'waiting' | 'resolved' | 'error'
-    lastError: null,
-
-    // Timers
+    status: 'searching',
     oddsTimer: null,
     priceTimer: null,
     countdownTimer: null,
     searchTimer: null,
 };
 
-// ============ DOM ============
 const $ = (id) => document.getElementById(id);
 
-// ============ GAMMA API: FIND ACTIVE BTC 5M MARKET ============
-async function findActiveMarket() {
+// ============ MARKET DISCOVERY ============
+// Polymarket BTC 5m markets are aligned to 5-minute boundaries (Unix timestamp % 300 == 0)
+function getCurrentMarketSlug() {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const aligned = Math.floor(nowSec / 300) * 300;
+    return `btc-updown-5m-${aligned}`;
+}
+
+function getNextMarketSlug() {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const next = Math.ceil(nowSec / 300) * 300;
+    return `btc-updown-5m-${next}`;
+}
+
+// Fetch market by slug (event endpoint)
+async function fetchEventBySlug(slug) {
     try {
-        // Try multiple query strategies to find active BTC 5m market
-        let events = [];
-
-        // Strategy 1: events endpoint with slug_contains
-        const urls = [
-            `${CONFIG.GAMMA_API}/events?slug_contains=btc-updown-5m&active=true&closed=false&limit=10`,
-            `${CONFIG.GAMMA_API}/events?tag=crypto&active=true&closed=false&limit=50`,
-        ];
-
-        for (const url of urls) {
-            try {
-                console.log('[PolyBTC] Trying:', url);
-                const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
-                if (!resp.ok) {
-                    console.log('[PolyBTC] Response:', resp.status);
-                    continue;
-                }
-                const data = await resp.json();
-                console.log('[PolyBTC] Got', data.length, 'events');
-                // Log ALL slugs so we can see what's available
-                console.log('[PolyBTC] All event slugs:', data.map(e => e.slug));
-                
-                // Filter for btc-updown-5m (try multiple patterns)
-                const filtered = data.filter(e => 
-                    (e.slug && (e.slug.includes('btc-updown-5m') || e.slug.includes('btc-up-down-5m') || e.slug.includes('bitcoin-5m'))) ||
-                    (e.title && e.title.includes('5') && e.title.toLowerCase().includes('btc'))
-                );
-                console.log('[PolyBTC] BTC 5m events found:', filtered.length, filtered.map(e => e.slug || e.title));
-                
-                if (filtered.length > 0) {
-                    events = filtered;
-                    break;
-                }
-                if (data.length > 0 && events.length === 0) {
-                    events = data.filter(e => e.slug && e.slug.includes('btc-updown-5m'));
-                }
-            } catch (e) {
-                console.log('[PolyBTC] Fetch error:', e.message);
-            }
-        }
-
-        // Strategy 2: Try markets endpoint directly if events didn't work
-        if (events.length === 0) {
-            console.log('[PolyBTC] Trying markets endpoint...');
-            try {
-                const resp = await fetch(
-                    `${CONFIG.GAMMA_API}/markets?active=true&closed=false&limit=50`,
-                    { signal: AbortSignal.timeout(10000) }
-                );
-                if (resp.ok) {
-                    const markets = await resp.json();
-                    console.log('[PolyBTC] Got', markets.length, 'markets');
-                    // Log all market slugs/questions
-                    console.log('[PolyBTC] All market slugs:', markets.slice(0, 10).map(m => m.slug || m.question));
-                    const btcMarkets = markets.filter(m => 
-                        (m.slug && (m.slug.includes('btc-updown-5m') || m.slug.includes('btc-up-down-5m') || m.slug.includes('bitcoin-5m'))) ||
-                        (m.question && m.question.toLowerCase().includes('btc') && (m.question.includes('5') || m.question.toLowerCase().includes('minute')))
-                    );
-                    console.log('[PolyBTC] BTC 5m markets:', btcMarkets.length, btcMarkets.map(m => m.slug || m.question));
-                    
-                    if (btcMarkets.length > 0) {
-                        // Convert market to event-like structure
-                        const market = btcMarkets[0];
-                        const endTime = new Date(market.endDate).getTime();
-                        const slugParts = (market.slug || '').split('-');
-                        const startUnix = parseInt(slugParts[slugParts.length - 1]);
-                        const startTime = isNaN(startUnix) ? endTime - 300000 : startUnix * 1000;
-
-                        let tokenIds = null;
-                        if (market.clobTokenIds) {
-                            try { tokenIds = JSON.parse(market.clobTokenIds); } catch(e) {}
-                        }
-                        let prices = null;
-                        if (market.outcomePrices) {
-                            try { prices = JSON.parse(market.outcomePrices); } catch(e) {}
-                        }
-
-                        console.log('[PolyBTC] Using market:', market.slug, 'tokens:', tokenIds, 'prices:', prices);
-                        return {
-                            event: null,
-                            market,
-                            slug: market.slug || market.groupItemTitle,
-                            question: market.question,
-                            startTime,
-                            endTime,
-                            tokenIdYes: tokenIds ? tokenIds[0] : null,
-                            tokenIdNo: tokenIds ? tokenIds[1] : null,
-                            priceYes: prices ? parseFloat(prices[0]) : null,
-                            priceNo: prices ? parseFloat(prices[1]) : null,
-                            volume: parseFloat(market.volume || 0),
-                            conditionId: market.conditionId || null,
-                        };
-                    }
-                }
-            } catch (e) {
-                console.log('[PolyBTC] Markets endpoint error:', e.message);
-            }
-        }
-
-        if (events.length === 0) {
-            console.log('[PolyBTC] No BTC 5m markets found via any strategy');
+        const url = `${CONFIG.GAMMA_API}/events?slug=${encodeURIComponent(slug)}`;
+        console.log('[PolyBTC] Trying event slug:', slug);
+        const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (!resp.ok) {
+            console.log('[PolyBTC] event response:', resp.status);
             return null;
         }
-
-        const now = Date.now();
-
-        // Find the currently ACTIVE market (started but not yet ended)
-        for (const event of events) {
-            if (!event.markets || event.markets.length === 0) continue;
-            const market = event.markets[0];
-
-            // Get end time
-            const endTime = new Date(market.endDate || event.endDate).getTime();
-            if (endTime <= now) continue; // Already ended
-
-            // Get start time from slug: btc-updown-5m-{unix_seconds}
-            const slugParts = (event.slug || '').split('-');
-            const startUnix = parseInt(slugParts[slugParts.length - 1]);
-            if (isNaN(startUnix)) continue;
-            const startTime = startUnix * 1000;
-
-            // Accept if hasn't ended yet (even if not started, we'll show countdown)
-            // Previously we skipped if startTime > now, but let's be more lenient
-
-            // Parse token IDs
-            let tokenIds = null;
-            if (market.clobTokenIds) {
-                try { tokenIds = JSON.parse(market.clobTokenIds); } catch(e) {}
-            }
-
-            // Parse current prices
-            let prices = null;
-            if (market.outcomePrices) {
-                try { prices = JSON.parse(market.outcomePrices); } catch(e) {}
-            }
-
-            console.log('[PolyBTC] Found active event:', event.slug, 'end:', new Date(endTime).toISOString(), 'start:', new Date(startTime).toISOString());
-
-            return {
-                event,
-                market,
-                slug: event.slug,
-                question: market.question || event.title,
-                startTime,
-                endTime,
-                tokenIdYes: tokenIds ? tokenIds[0] : null,
-                tokenIdNo: tokenIds ? tokenIds[1] : null,
-                priceYes: prices ? parseFloat(prices[0]) : null,
-                priceNo: prices ? parseFloat(prices[1]) : null,
-                volume: parseFloat(market.volume || event.volume || 0),
-                conditionId: market.conditionId || null,
-            };
-        }
-
-        // No active market found - check if there's an upcoming one
-        for (const event of events) {
-            if (!event.markets || event.markets.length === 0) continue;
-            const market = event.markets[0];
-            const endTime = new Date(market.endDate || event.endDate).getTime();
-            if (endTime <= now) continue;
-
-            const slugParts = (event.slug || '').split('-');
-            const startUnix = parseInt(slugParts[slugParts.length - 1]);
-            if (isNaN(startUnix)) continue;
-            const startTime = startUnix * 1000;
-
-            // This market hasn't started yet - return it so we can show countdown to start
-            if (startTime > now) {
-                let tokenIds = null;
-                if (market.clobTokenIds) {
-                    try { tokenIds = JSON.parse(market.clobTokenIds); } catch(e) {}
-                }
-                let prices = null;
-                if (market.outcomePrices) {
-                    try { prices = JSON.parse(market.outcomePrices); } catch(e) {}
-                }
-
-                return {
-                    event,
-                    market,
-                    slug: event.slug,
-                    question: market.question || event.title,
-                    startTime,
-                    endTime,
-                    tokenIdYes: tokenIds ? tokenIds[0] : null,
-                    tokenIdNo: tokenIds ? tokenIds[1] : null,
-                    priceYes: prices ? parseFloat(prices[0]) : null,
-                    priceNo: prices ? parseFloat(prices[1]) : null,
-                    volume: parseFloat(market.volume || event.volume || 0),
-                    conditionId: market.conditionId || null,
-                    upcoming: true,
-                };
-            }
-        }
-
+        const data = await resp.json();
+        console.log('[PolyBTC] event data:', data.length, 'events');
+        if (data.length > 0) return data[0];
         return null;
-    } catch (err) {
-        console.error('findActiveMarket:', err);
-        state.lastError = err.message;
+    } catch (e) {
+        console.log('[PolyBTC] fetchEventBySlug error:', e.message);
         return null;
     }
 }
 
-// ============ CLOB API: GET REAL-TIME MIDPOINT ============
+// Fetch market by slug (markets endpoint)
+async function fetchMarketBySlug(slug) {
+    try {
+        const url = `${CONFIG.GAMMA_API}/markets?slug=${encodeURIComponent(slug)}`;
+        console.log('[PolyBTC] Trying market slug:', slug);
+        const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (!resp.ok) {
+            console.log('[PolyBTC] market response:', resp.status);
+            return null;
+        }
+        const data = await resp.json();
+        console.log('[PolyBTC] market data:', data.length, 'markets');
+        if (data.length > 0) return data[0];
+        return null;
+    } catch (e) {
+        console.log('[PolyBTC] fetchMarketBySlug error:', e.message);
+        return null;
+    }
+}
+
+function buildMarketDataFromEvent(event, slug) {
+    if (!event.markets || event.markets.length === 0) {
+        // Event itself might have token IDs
+        return null;
+    }
+    const m = event.markets[0];
+    return buildMarketDataFromMarket(m, slug, event);
+}
+
+function buildMarketDataFromMarket(market, slug, event = null) {
+    if (!market) return null;
+
+    const slugParts = slug.split('-');
+    const startUnix = parseInt(slugParts[slugParts.length - 1]);
+    const startTime = startUnix * 1000;
+    const endTime = startTime + 5 * 60 * 1000; // 5 minutes after start
+
+    let tokenIds = null;
+    if (market.clobTokenIds) {
+        try {
+            tokenIds = typeof market.clobTokenIds === 'string'
+                ? JSON.parse(market.clobTokenIds)
+                : market.clobTokenIds;
+        } catch (e) {}
+    }
+    let prices = null;
+    if (market.outcomePrices) {
+        try {
+            prices = typeof market.outcomePrices === 'string'
+                ? JSON.parse(market.outcomePrices)
+                : market.outcomePrices;
+        } catch (e) {}
+    }
+
+    console.log('[PolyBTC] Built market:', slug, 'tokens:', tokenIds, 'prices:', prices);
+
+    return {
+        market,
+        event,
+        slug,
+        question: market.question || (event && event.title) || `BTC Up or Down 5m`,
+        startTime,
+        endTime,
+        tokenIdYes: tokenIds ? String(tokenIds[0]) : null,
+        tokenIdNo: tokenIds ? String(tokenIds[1]) : null,
+        priceYes: prices ? parseFloat(prices[0]) : null,
+        priceNo: prices ? parseFloat(prices[1]) : null,
+        volume: parseFloat(market.volume || (event && event.volume) || 0),
+        conditionId: market.conditionId || null,
+    };
+}
+
+async function findActiveMarket() {
+    // Try the current 5-minute boundary first
+    const currentSlug = getCurrentMarketSlug();
+    console.log('[PolyBTC] Computed current slug:', currentSlug);
+
+    // Try fetching by event slug
+    let event = await fetchEventBySlug(currentSlug);
+    if (event) {
+        const md = buildMarketDataFromEvent(event, currentSlug);
+        if (md && md.tokenIdYes) {
+            console.log('[PolyBTC] Found via event:', currentSlug);
+            return md;
+        }
+    }
+
+    // Try fetching by market slug
+    let market = await fetchMarketBySlug(currentSlug);
+    if (market) {
+        const md = buildMarketDataFromMarket(market, currentSlug);
+        if (md && md.tokenIdYes) {
+            console.log('[PolyBTC] Found via market:', currentSlug);
+            return md;
+        }
+    }
+
+    // Try previous 5-min boundary (in case current is mid-cycle)
+    const prevSlug = `btc-updown-5m-${(Math.floor(Date.now()/1000/300)-1)*300}`;
+    console.log('[PolyBTC] Trying previous slug:', prevSlug);
+    event = await fetchEventBySlug(prevSlug);
+    if (event) {
+        const md = buildMarketDataFromEvent(event, prevSlug);
+        if (md && md.tokenIdYes && md.endTime > Date.now()) {
+            console.log('[PolyBTC] Found via previous slug:', prevSlug);
+            return md;
+        }
+    }
+    market = await fetchMarketBySlug(prevSlug);
+    if (market) {
+        const md = buildMarketDataFromMarket(market, prevSlug);
+        if (md && md.tokenIdYes && md.endTime > Date.now()) {
+            console.log('[PolyBTC] Found via previous market slug:', prevSlug);
+            return md;
+        }
+    }
+
+    // Fallback: search all events for any btc-updown-5m
+    console.log('[PolyBTC] Fallback: searching all events...');
+    try {
+        const resp = await fetch(
+            `${CONFIG.GAMMA_API}/events?active=true&closed=false&limit=100`,
+            { signal: AbortSignal.timeout(10000) }
+        );
+        if (resp.ok) {
+            const events = await resp.json();
+            console.log('[PolyBTC] Got', events.length, 'events');
+            const btcEvents = events.filter(e =>
+                e.slug && e.slug.startsWith('btc-updown-5m-')
+            );
+            console.log('[PolyBTC] btc-updown-5m events:', btcEvents.length, btcEvents.map(e => e.slug));
+            const now = Date.now();
+            for (const e of btcEvents) {
+                const md = buildMarketDataFromEvent(e, e.slug);
+                if (md && md.tokenIdYes && md.endTime > now) {
+                    return md;
+                }
+            }
+        }
+    } catch (e) {
+        console.log('[PolyBTC] fallback error:', e.message);
+    }
+
+    return null;
+}
+
+// ============ CLOB API ============
 async function fetchMidpoint(tokenId) {
     try {
         const resp = await fetch(
@@ -292,11 +245,10 @@ async function fetchMidpoint(tokenId) {
     }
 }
 
-// Also try the price endpoint as alternative
-async function fetchPrice(tokenId) {
+async function fetchPrice(tokenId, side) {
     try {
         const resp = await fetch(
-            `${CONFIG.CLOB_API}/price?token_id=${tokenId}&side=buy`,
+            `${CONFIG.CLOB_API}/price?token_id=${tokenId}&side=${side || 'buy'}`,
             { signal: AbortSignal.timeout(5000) }
         );
         if (!resp.ok) return null;
@@ -307,17 +259,10 @@ async function fetchPrice(tokenId) {
     }
 }
 
-async function refreshOddsFromPoly() {
+async function refreshOdds() {
     if (!state.tokenIdYes) return;
-
-    // Try midpoint first (most accurate - between best bid and ask)
     let price = await fetchMidpoint(state.tokenIdYes);
-    
-    // Fallback to price endpoint
-    if (price === null) {
-        price = await fetchPrice(state.tokenIdYes);
-    }
-
+    if (price === null) price = await fetchPrice(state.tokenIdYes, 'buy');
     if (price !== null && price > 0 && price < 1) {
         state.priceYes = price;
         state.priceNo = 1 - price;
@@ -326,7 +271,7 @@ async function refreshOddsFromPoly() {
     }
 }
 
-// ============ BINANCE: REAL BTC PRICE ============
+// ============ BTC PRICE ============
 async function fetchBtcPrice() {
     try {
         const resp = await fetch(
@@ -340,7 +285,6 @@ async function fetchBtcPrice() {
             return;
         }
     } catch (e) {}
-
     try {
         const resp = await fetch(
             'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd',
@@ -358,97 +302,55 @@ async function fetchBtcPrice() {
 async function searchAndConnect() {
     setStatus('searching');
     stopAllTimers();
+    showToast('Searching for BTC 5m market on Polymarket...', 'info');
 
-    const marketData = await findActiveMarket();
-
-    if (!marketData) {
+    const md = await findActiveMarket();
+    if (!md) {
         setStatus('waiting');
-        showToast('No active BTC 5m market on Polymarket right now. Waiting...', 'info');
-        // Keep searching
-        state.searchTimer = setInterval(async () => {
-            const m = await findActiveMarket();
-            if (m) {
-                clearInterval(state.searchTimer);
-                state.searchTimer = null;
-                connectToMarket(m);
-            }
-        }, CONFIG.SEARCH_MARKET_MS);
+        showToast('No active BTC 5m market. Retrying in 5s...', 'info');
+        state.searchTimer = setTimeout(searchAndConnect, CONFIG.SEARCH_RETRY_MS);
         return;
     }
 
-    if (marketData.upcoming) {
-        // Market hasn't started yet - wait for it
-        setStatus('waiting');
-        const waitMs = marketData.startTime - Date.now();
-        showToast(`Next market starts in ${Math.ceil(waitMs/1000)}s. Waiting...`, 'info');
-        $('market-title').textContent = marketData.question || 'Waiting for market...';
-        $('countdown').textContent = formatTime(Math.ceil(waitMs / 1000));
-        
-        state.searchTimer = setTimeout(() => {
-            searchAndConnect();
-        }, Math.min(waitMs + 1000, 30000));
-        return;
-    }
-
-    connectToMarket(marketData);
+    connectToMarket(md);
 }
 
-function connectToMarket(marketData) {
-    // Store market data
-    state.market = marketData;
-    state.slug = marketData.slug;
-    state.question = marketData.question;
-    state.tokenIdYes = marketData.tokenIdYes;
-    state.tokenIdNo = marketData.tokenIdNo;
-    state.marketStartTime = marketData.startTime;
-    state.marketEndTime = marketData.endTime;
-    state.conditionId = marketData.conditionId;
-    state.volume = Math.round(marketData.volume || 0);
+function connectToMarket(md) {
+    state.market = md;
+    state.slug = md.slug;
+    state.question = md.question;
+    state.tokenIdYes = md.tokenIdYes;
+    state.tokenIdNo = md.tokenIdNo;
+    state.marketStartTime = md.startTime;
+    state.marketEndTime = md.endTime;
+    state.volume = Math.round(md.volume || 0);
     state.positions = [];
     state.marketActive = true;
+    state.priceYes = md.priceYes !== null ? md.priceYes : 0.5;
+    state.priceNo = md.priceNo !== null ? md.priceNo : 0.5;
 
-    // Set initial prices from Gamma API snapshot
-    if (marketData.priceYes !== null) {
-        state.priceYes = marketData.priceYes;
-        state.priceNo = marketData.priceNo;
-    } else {
-        state.priceYes = 0.50;
-        state.priceNo = 0.50;
-    }
-
-    // Get BTC price
     fetchBtcPrice().then(() => {
         state.btcStartPrice = state.btcPrice;
         renderStartPrice();
     });
 
-    // Render UI
     setStatus('live');
     renderMarketInfo();
     renderOdds();
     renderBalance();
     renderPositions();
 
-    showToast(`Connected to: ${marketData.question}`, 'success');
+    showToast(`Connected: ${md.question}`, 'success');
 
-    // Start real-time polling
-    state.oddsTimer = setInterval(refreshOddsFromPoly, CONFIG.REFRESH_ODDS_MS);
+    state.oddsTimer = setInterval(refreshOdds, CONFIG.REFRESH_ODDS_MS);
     state.priceTimer = setInterval(fetchBtcPrice, CONFIG.REFRESH_PRICE_MS);
-
-    // Start countdown (synced to real market end time)
     state.countdownTimer = setInterval(() => {
-        const now = Date.now();
-        const remaining = Math.max(0, Math.floor((state.marketEndTime - now) / 1000));
-
+        const remaining = Math.max(0, Math.floor((state.marketEndTime - Date.now()) / 1000));
         renderCountdown(remaining);
-
-        if (remaining <= 0) {
-            resolveMarket();
-        }
+        if (remaining <= 0) resolveMarket();
     }, 1000);
 
-    // Immediately fetch latest odds from CLOB
-    refreshOddsFromPoly();
+    refreshOdds();
 }
 
 function resolveMarket() {
@@ -456,30 +358,21 @@ function resolveMarket() {
     state.marketActive = false;
     setStatus('resolved');
 
-    // Determine outcome: BTC end price vs start price
     const outcome = state.btcPrice >= state.btcStartPrice ? 'up' : 'down';
-
-    // Settle positions
     let roundPnl = 0;
     let roundWon = false;
 
     state.positions.forEach(pos => {
         const won = pos.side === outcome;
-        const payout = won ? pos.shares : 0; // $1 per share if won
+        const payout = won ? pos.shares : 0;
         const pnl = payout - pos.cost;
-
-        if (won) {
-            state.balance += payout;
-            roundWon = true;
-        }
-
+        if (won) { state.balance += payout; roundWon = true; }
         roundPnl += pnl;
         state.history.push({
             side: pos.side, cost: pos.cost, shares: pos.shares,
             price: pos.price, pnl, won, outcome,
             timestamp: Date.now(), question: state.question,
         });
-
         state.totalTrades++;
         if (won) state.wins++;
         state.totalPnl += pnl;
@@ -494,7 +387,7 @@ function resolveMarket() {
         showModal(outcome, roundPnl, roundWon);
     } else {
         showToast(`Resolved: ${outcome.toUpperCase()}. Finding next market...`, 'info');
-        setTimeout(searchAndConnect, 3000);
+        setTimeout(searchAndConnect, 2000);
     }
 }
 
@@ -502,14 +395,13 @@ function stopAllTimers() {
     if (state.oddsTimer) { clearInterval(state.oddsTimer); state.oddsTimer = null; }
     if (state.priceTimer) { clearInterval(state.priceTimer); state.priceTimer = null; }
     if (state.countdownTimer) { clearInterval(state.countdownTimer); state.countdownTimer = null; }
-    if (state.searchTimer) { clearInterval(state.searchTimer); clearTimeout(state.searchTimer); state.searchTimer = null; }
+    if (state.searchTimer) { clearTimeout(state.searchTimer); state.searchTimer = null; }
 }
 
 // ============ PAPER TRADING ============
 function placeTrade() {
     if (!state.marketActive) return showToast('No active market', 'error');
     if (state.priceYes === null) return showToast('Waiting for price data...', 'error');
-
     const amount = parseFloat($('trade-amount').value);
     if (!amount || amount <= 0) return showToast('Enter a valid amount', 'error');
     if (amount > state.balance) return showToast('Insufficient balance', 'error');
@@ -523,7 +415,7 @@ function placeTrade() {
 
     renderBalance();
     renderPositions();
-    showToast(`Bought ${shares.toFixed(2)} ${side.toUpperCase()} @ $${price.toFixed(3)} (Poly price)`, 'success');
+    showToast(`Bought ${shares.toFixed(2)} ${side.toUpperCase()} @ $${price.toFixed(3)}`, 'success');
 }
 
 // ============ RENDERING ============
@@ -547,14 +439,14 @@ function setStatus(status) {
             tag.textContent = 'LIVE';
             tag.className = 'tag live';
             dot.className = 'source-dot live';
-            label.textContent = 'Polymarket Live Data (Gamma + CLOB)';
+            label.textContent = 'Polymarket Live (Gamma + CLOB)';
             btn.disabled = false;
             break;
         case 'waiting':
             tag.textContent = 'WAITING';
             tag.className = 'tag crypto';
             dot.className = 'source-dot sim';
-            label.textContent = 'Waiting for next Polymarket BTC 5m market...';
+            label.textContent = 'Waiting for next BTC 5m market...';
             btn.disabled = true;
             break;
         case 'resolved':
@@ -562,13 +454,6 @@ function setStatus(status) {
             tag.className = 'tag ended';
             dot.className = 'source-dot';
             label.textContent = 'Market ended. Searching for next...';
-            btn.disabled = true;
-            break;
-        case 'error':
-            tag.textContent = 'ERROR';
-            tag.className = 'tag ended';
-            dot.className = 'source-dot';
-            label.textContent = `API Error: ${state.lastError || 'Unknown'}`;
             btn.disabled = true;
             break;
     }
@@ -587,10 +472,8 @@ function renderMarketInfo() {
 
 function renderOdds() {
     if (state.priceYes === null) return;
-
     const upPct = Math.round(state.priceYes * 100);
     const downPct = 100 - upPct;
-
     $('odds-up').textContent = `${upPct}%`;
     $('odds-down').textContent = `${downPct}%`;
     $('price-up').textContent = `$${state.priceYes.toFixed(3)}`;
@@ -600,7 +483,9 @@ function renderOdds() {
 }
 
 function renderCountdown(seconds) {
-    $('countdown').textContent = formatTime(seconds);
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    $('countdown').textContent = `${m}:${s.toString().padStart(2,'0')}`;
     const el = $('countdown');
     if (seconds <= 30) el.style.color = 'var(--down-color)';
     else if (seconds <= 60) el.style.color = '#f59e0b';
@@ -609,10 +494,7 @@ function renderCountdown(seconds) {
 
 function renderBtcPrice() {
     if (!state.btcPrice) return;
-    $('btc-price').textContent = `$${state.btcPrice.toLocaleString('en-US', {
-        minimumFractionDigits: 2, maximumFractionDigits: 2
-    })}`;
-
+    $('btc-price').textContent = `$${state.btcPrice.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
     if (state.btcStartPrice) {
         const change = state.btcPrice - state.btcStartPrice;
         const pct = (change / state.btcStartPrice) * 100;
@@ -625,7 +507,7 @@ function renderBtcPrice() {
 
 function renderStartPrice() {
     $('start-price').textContent = state.btcStartPrice
-        ? `$${state.btcStartPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
+        ? `$${state.btcStartPrice.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`
         : '--';
 }
 
@@ -644,23 +526,18 @@ function renderTradeSummary() {
     const amount = parseFloat($('trade-amount').value) || 0;
     const price = state.currentSide === 'up' ? (state.priceYes || 0.5) : (state.priceNo || 0.5);
     const shares = price > 0 ? amount / price : 0;
-    const payout = shares;
-    const profit = payout - amount;
+    const profit = shares - amount;
     const profitPct = amount > 0 ? (profit / amount) * 100 : 0;
-
     $('shares-count').textContent = shares.toFixed(2);
     $('avg-price').textContent = `$${price.toFixed(3)}`;
-    $('potential-payout').textContent = `$${payout.toFixed(2)}`;
+    $('potential-payout').textContent = `$${shares.toFixed(2)}`;
     $('potential-profit').textContent = `+$${profit.toFixed(2)} (${profitPct.toFixed(0)}%)`;
 }
 
 function renderPositions() {
     const section = $('positions-section');
     const list = $('positions-list');
-    if (state.positions.length === 0) {
-        section.style.display = 'none';
-        return;
-    }
+    if (state.positions.length === 0) { section.style.display = 'none'; return; }
     section.style.display = 'block';
     list.innerHTML = state.positions.map(pos => `
         <div class="position-item">
@@ -700,15 +577,12 @@ function renderStats() {
     $('stat-best').textContent = `+$${state.bestTrade.toFixed(2)}`;
 }
 
-// ============ MODAL ============
 function showModal(outcome, pnl, won) {
     $('modal-icon').innerHTML = won ? '&#127881;' : '&#128546;';
     $('modal-title').textContent = won ? 'You Won!' : 'Market Resolved';
     $('modal-result').textContent = `BTC went ${outcome.toUpperCase()} in this 5-minute window.`;
-
     const change = (state.btcPrice || 0) - (state.btcStartPrice || 0);
     const pct = state.btcStartPrice ? (change / state.btcStartPrice) * 100 : 0;
-
     $('modal-details').innerHTML = `
         <div class="detail-row"><span>Start Price</span><span>$${(state.btcStartPrice||0).toLocaleString('en-US',{minimumFractionDigits:2})}</span></div>
         <div class="detail-row"><span>End Price</span><span>$${(state.btcPrice||0).toLocaleString('en-US',{minimumFractionDigits:2})}</span></div>
@@ -719,15 +593,7 @@ function showModal(outcome, pnl, won) {
             <span style="color:${pnl>=0?'var(--up-color)':'var(--down-color)'}; font-weight:700; font-size:16px;">${pnl>=0?'+':''}$${pnl.toFixed(2)}</span>
         </div>
     `;
-
     $('modal-overlay').style.display = 'flex';
-}
-
-// ============ UTILITIES ============
-function formatTime(seconds) {
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 function showToast(message, type = 'info') {
@@ -744,7 +610,6 @@ function showToast(message, type = 'info') {
     }, 4000);
 }
 
-// ============ EVENTS ============
 function setupEvents() {
     $('tab-up').addEventListener('click', () => {
         state.currentSide = 'up';
@@ -754,7 +619,6 @@ function setupEvents() {
         $('place-trade-btn').innerHTML = 'Buy UP &#9650;';
         renderTradeSummary();
     });
-
     $('tab-down').addEventListener('click', () => {
         state.currentSide = 'down';
         $('tab-down').classList.add('active');
@@ -763,24 +627,20 @@ function setupEvents() {
         $('place-trade-btn').innerHTML = 'Buy DOWN &#9660;';
         renderTradeSummary();
     });
-
     document.querySelectorAll('.quick-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             $('trade-amount').value = btn.dataset.amount;
             renderTradeSummary();
         });
     });
-
     $('trade-amount').addEventListener('input', renderTradeSummary);
     $('place-trade-btn').addEventListener('click', placeTrade);
-
     $('modal-close-btn').addEventListener('click', () => {
         $('modal-overlay').style.display = 'none';
         state.positions = [];
         renderPositions();
         searchAndConnect();
     });
-
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && state.marketActive && $('modal-overlay').style.display === 'none') {
             placeTrade();
@@ -788,14 +648,12 @@ function setupEvents() {
     });
 }
 
-// ============ INIT ============
 async function init() {
     setupEvents();
     renderBalance();
     renderTradeSummary();
     renderHistory();
     renderStats();
-
     showToast('Connecting to Polymarket...', 'info');
     await searchAndConnect();
 }
