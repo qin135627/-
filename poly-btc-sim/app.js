@@ -48,6 +48,7 @@ const state = {
     searchTimer: null,
     priceHistory: [],   // [{t, polyUp, btcPct}] for chart
     chartInterval: null,
+    marketDuration: 5,  // 5 or 15 minutes
 };
 
 const $ = (id) => document.getElementById(id);
@@ -56,14 +57,18 @@ const $ = (id) => document.getElementById(id);
 // Polymarket BTC 5m markets are aligned to 5-minute boundaries (Unix timestamp % 300 == 0)
 function getCurrentMarketSlug() {
     const nowSec = Math.floor(Date.now() / 1000);
-    const aligned = Math.floor(nowSec / 300) * 300;
-    return `btc-updown-5m-${aligned}`;
+    const interval = state.marketDuration * 60; // 300 or 900
+    const aligned = Math.floor(nowSec / interval) * interval;
+    const prefix = state.marketDuration === 5 ? 'btc-updown-5m' : 'btc-updown-15m';
+    return `${prefix}-${aligned}`;
 }
 
 function getNextMarketSlug() {
     const nowSec = Math.floor(Date.now() / 1000);
-    const next = Math.ceil(nowSec / 300) * 300;
-    return `btc-updown-5m-${next}`;
+    const interval = state.marketDuration * 60;
+    const next = Math.ceil(nowSec / interval) * interval;
+    const prefix = state.marketDuration === 5 ? 'btc-updown-5m' : 'btc-updown-15m';
+    return `${prefix}-${next}`;
 }
 
 // Fetch market by slug (event endpoint)
@@ -121,7 +126,7 @@ function buildMarketDataFromMarket(market, slug, event = null) {
     const slugParts = slug.split('-');
     const startUnix = parseInt(slugParts[slugParts.length - 1]);
     const startTime = startUnix * 1000;
-    const endTime = startTime + 5 * 60 * 1000; // 5 minutes after start
+    const endTime = startTime + state.marketDuration * 60 * 1000; // duration minutes after start
 
     let tokenIds = null;
     if (market.clobTokenIds) {
@@ -184,7 +189,9 @@ async function findActiveMarket() {
     }
 
     // Try previous 5-min boundary (in case current is mid-cycle)
-    const prevSlug = `btc-updown-5m-${(Math.floor(Date.now()/1000/300)-1)*300}`;
+    const interval = state.marketDuration * 60;
+    const prefix = state.marketDuration === 5 ? 'btc-updown-5m' : 'btc-updown-15m';
+    const prevSlug = `${prefix}-${(Math.floor(Date.now()/1000/interval)-1)*interval}`;
     console.log('[PolyBTC] Trying previous slug:', prevSlug);
     event = await fetchEventBySlug(prevSlug);
     if (event) {
@@ -213,8 +220,9 @@ async function findActiveMarket() {
         if (resp.ok) {
             const events = await resp.json();
             console.log('[PolyBTC] Got', events.length, 'events');
+            const prefix = state.marketDuration === 5 ? 'btc-updown-5m-' : 'btc-updown-15m-';
             const btcEvents = events.filter(e =>
-                e.slug && e.slug.startsWith('btc-updown-5m-')
+                e.slug && e.slug.startsWith(prefix)
             );
             console.log('[PolyBTC] btc-updown-5m events:', btcEvents.length, btcEvents.map(e => e.slug));
             const now = Date.now();
@@ -541,19 +549,41 @@ function placeTrade() {
     if (!amount || amount <= 0) return showToast('Enter a valid amount', 'error');
     if (amount > state.balance) return showToast('Insufficient balance', 'error');
 
-    const side = state.currentSide;
-    const price = side === 'up' ? state.priceYes : state.priceNo;
-    const shares = amount / price;
-
+    // Deduct balance immediately (like Polymarket)
     state.balance -= amount;
-    state.positions.push({
-        id: Date.now() + '-' + Math.floor(Math.random() * 10000),
-        side, shares, price, cost: amount, timestamp: Date.now(),
-    });
-
     renderBalance();
-    renderPositions();
-    showToast(`Bought ${shares.toFixed(2)} ${side.toUpperCase()} @ $${price.toFixed(3)}`, 'success');
+
+    const side = state.currentSide;
+    const btn = $('place-trade-btn');
+    btn.disabled = true;
+    btn.textContent = 'Executing (3s)...';
+    btn.classList.add('trade-pending');
+
+    showToast(`Order pending... executing in 3s`, 'info');
+
+    // 3-second delay to simulate order execution
+    setTimeout(() => {
+        // Use the CURRENT price at execution time (price may have moved!)
+        const execPrice = side === 'up' ? state.priceYes : state.priceNo;
+        if (!execPrice || execPrice <= 0) {
+            // Refund if no price available
+            state.balance += amount;
+            renderBalance();
+            showToast('Execution failed - no price. Refunded.', 'error');
+        } else {
+            const shares = amount / execPrice;
+            state.positions.push({
+                id: Date.now() + '-' + Math.floor(Math.random() * 10000),
+                side, shares, price: execPrice, cost: amount, timestamp: Date.now(),
+            });
+            renderPositions();
+            showToast(`Filled ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)}`, 'success');
+        }
+
+        btn.disabled = false;
+        btn.classList.remove('trade-pending');
+        btn.innerHTML = side === 'up' ? 'Buy UP &#9650;' : 'Buy DOWN &#9660;';
+    }, 3000);
 }
 
 // Sell a position at current Polymarket midpoint price
@@ -564,34 +594,50 @@ function sellPosition(positionId) {
 
     if (state.priceYes === null) return showToast('Waiting for price data...', 'error');
 
-    // Sell price = current midpoint of the side held
-    const sellPrice = pos.side === 'up' ? state.priceYes : state.priceNo;
-    const proceeds = pos.shares * sellPrice;
-    const pnl = proceeds - pos.cost;
+    // Disable the sell button
+    const sellBtns = document.querySelectorAll('.sell-btn');
+    sellBtns.forEach(btn => { btn.disabled = true; btn.textContent = 'Selling...'; });
 
-    state.balance += proceeds;
-    state.positions.splice(idx, 1);
+    showToast(`Selling... executing in 3s`, 'info');
 
-    // Track in history as a closed trade (won = profit > 0)
-    state.history.push({
-        side: pos.side, cost: pos.cost, shares: pos.shares,
-        price: pos.price, sellPrice, pnl,
-        won: pnl > 0, outcome: 'sold', sold: true,
-        timestamp: Date.now(), question: state.question,
-    });
-    state.totalTrades++;
-    if (pnl > 0) state.wins++;
-    state.totalPnl += pnl;
-    if (pnl > state.bestTrade) state.bestTrade = pnl;
+    // 3-second delay
+    setTimeout(() => {
+        // Re-find position (might have been removed by resolution)
+        const currentIdx = state.positions.findIndex(p => p.id === positionId);
+        if (currentIdx === -1) {
+            showToast('Position no longer exists', 'error');
+            renderPositions();
+            return;
+        }
 
-    renderBalance();
-    renderPositions();
-    renderHistory();
-    renderStats();
+        // Use CURRENT price at execution time
+        const sellPrice = pos.side === 'up' ? state.priceYes : state.priceNo;
+        const proceeds = pos.shares * sellPrice;
+        const pnl = proceeds - pos.cost;
 
-    const sign = pnl >= 0 ? '+' : '';
-    showToast(`Sold ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)}, P&L: ${sign}$${pnl.toFixed(2)}`,
-        pnl >= 0 ? 'success' : 'error');
+        state.balance += proceeds;
+        state.positions.splice(currentIdx, 1);
+
+        state.history.push({
+            side: pos.side, cost: pos.cost, shares: pos.shares,
+            price: pos.price, sellPrice, pnl,
+            won: pnl > 0, outcome: 'sold', sold: true,
+            timestamp: Date.now(), question: state.question,
+        });
+        state.totalTrades++;
+        if (pnl > 0) state.wins++;
+        state.totalPnl += pnl;
+        if (pnl > state.bestTrade) state.bestTrade = pnl;
+
+        renderBalance();
+        renderPositions();
+        renderHistory();
+        renderStats();
+
+        const sign = pnl >= 0 ? '+' : '';
+        showToast(`Sold ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)}, P&L: ${sign}$${pnl.toFixed(2)}`,
+            pnl >= 0 ? 'success' : 'error');
+    }, 3000);
 }
 
 // ============ RENDERING ============
@@ -852,6 +898,25 @@ function setupEvents() {
         renderPositions();
         searchAndConnect();
     });
+    // Market duration selector
+    const btn5m = $('btn-5m');
+    const btn15m = $('btn-15m');
+    if (btn5m && btn15m) {
+        btn5m.addEventListener('click', () => {
+            if (state.marketDuration === 5) return;
+            state.marketDuration = 5;
+            btn5m.classList.add('active');
+            btn15m.classList.remove('active');
+            searchAndConnect();
+        });
+        btn15m.addEventListener('click', () => {
+            if (state.marketDuration === 15) return;
+            state.marketDuration = 15;
+            btn15m.classList.add('active');
+            btn5m.classList.remove('active');
+            searchAndConnect();
+        });
+    }
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && state.marketActive && $('modal-overlay').style.display === 'none') {
             placeTrade();

@@ -960,3 +960,160 @@ body {
     cursor: not-allowed;
     transform: none;
 }
+
+
+/* ============ MOBILE RESPONSIVE ============ */
+@media (max-width: 768px) {
+    .header {
+        padding: 12px 16px;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .header-left span {
+        display: none;
+    }
+    .main {
+        grid-template-columns: 1fr;
+        padding: 0 12px;
+        gap: 16px;
+        margin: 12px auto;
+    }
+    .market-header, .price-section, .odds-section, .chart-section, .trading-panel, .positions-section {
+        padding: 16px;
+    }
+    .market-title {
+        font-size: 18px;
+    }
+    .price-value {
+        font-size: 22px;
+    }
+    .price-info {
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+    }
+    .odds-value {
+        font-size: 22px;
+    }
+    .odds-item {
+        padding: 12px;
+    }
+    .trade-tab {
+        padding: 14px;
+        font-size: 16px;
+    }
+    .trade-btn {
+        padding: 16px;
+        font-size: 18px;
+    }
+    .quick-amounts {
+        flex-wrap: wrap;
+    }
+    .quick-btn {
+        padding: 10px 12px;
+        font-size: 14px;
+    }
+    .input-wrapper input {
+        font-size: 20px;
+        padding: 14px 14px 14px 30px;
+    }
+    .sell-btn {
+        padding: 10px 16px;
+        font-size: 14px;
+    }
+    .position-item {
+        grid-template-columns: auto 1fr auto;
+        gap: 8px;
+        padding: 10px;
+    }
+    .history-panel {
+        position: static;
+    }
+    #odds-chart {
+        height: 150px;
+    }
+    .balance-display {
+        padding: 6px 12px;
+    }
+    .balance-amount {
+        font-size: 16px;
+    }
+}
+
+@media (max-width: 480px) {
+    .price-info {
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 6px;
+    }
+    .info-label {
+        font-size: 10px;
+    }
+    .info-value {
+        font-size: 14px;
+    }
+    .odds-labels {
+        gap: 8px;
+    }
+    .position-item {
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+    .position-info {
+        order: 2;
+    }
+    .sell-btn {
+        order: 3;
+        width: 100%;
+    }
+}
+
+/* Market type selector */
+.market-type-selector {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.market-type-btn {
+    padding: 8px 16px;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.market-type-btn.active {
+    background: var(--accent-bg);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.market-type-btn:hover:not(.active) {
+    border-color: var(--text-muted);
+    color: var(--text-primary);
+}
+
+/* Trade pending overlay */
+.trade-pending {
+    position: relative;
+    pointer-events: none;
+    opacity: 0.7;
+}
+
+.trade-pending::after {
+    content: 'Executing...';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.6);
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 14px;
+    border-radius: var(--radius-sm);
+    animation: pulse 1s infinite;
+}
