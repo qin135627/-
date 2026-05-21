@@ -53,6 +53,34 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+// ============ OPERATION LOG ============
+const opLog = [];
+
+function addLog(type, message) {
+    const now = new Date();
+    const time = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
+    opLog.push({ time, type, message });
+    if (opLog.length > 100) opLog.shift(); // keep last 100 entries
+    renderLog();
+}
+
+function renderLog() {
+    const list = $('log-list');
+    if (!list) return;
+    if (opLog.length === 0) {
+        list.innerHTML = '<div class="log-empty">No operations yet.</div>';
+        return;
+    }
+    list.innerHTML = opLog.slice().reverse().map(entry => `
+        <div class="log-entry ${entry.type}">
+            <span class="log-time">${entry.time}</span>
+            <span class="log-type">[${entry.type.toUpperCase()}]</span>
+            ${entry.message}
+        </div>
+    `).join('');
+    list.scrollTop = 0;
+}
+
 // ============ MARKET DISCOVERY ============
 // Polymarket BTC 5m markets are aligned to 5-minute boundaries (Unix timestamp % 300 == 0)
 function getCurrentMarketSlug() {
@@ -482,6 +510,7 @@ function connectToMarket(md) {
     drawChart();
 
     showToast(`Connected: ${md.question}`, 'success');
+    addLog('connect', `Market: ${md.question} | Slug: ${md.slug}`);
 
     state.oddsTimer = setInterval(refreshOdds, CONFIG.REFRESH_ODDS_MS);
     state.priceTimer = setInterval(fetchBtcPrice, CONFIG.REFRESH_PRICE_MS);
@@ -527,8 +556,10 @@ function resolveMarket() {
     renderStats();
 
     if (state.positions.length > 0) {
+        addLog('resolve', `Market ${outcome.toUpperCase()} | BTC: $${(state.btcStartPrice||0).toFixed(0)} → $${(state.btcPrice||0).toFixed(0)} | Round P&L: ${roundPnl >= 0 ? '+' : ''}$${roundPnl.toFixed(2)}`);
         showModal(outcome, roundPnl, roundWon);
     } else {
+        addLog('resolve', `Market ${outcome.toUpperCase()} | BTC: $${(state.btcStartPrice||0).toFixed(0)} → $${(state.btcPrice||0).toFixed(0)} | No positions`);
         showToast(`Resolved: ${outcome.toUpperCase()}. Finding next market...`, 'info');
         setTimeout(searchAndConnect, 2000);
     }
@@ -565,6 +596,7 @@ function placeTrade() {
     btn.classList.add('trade-pending');
 
     showToast(`Order pending @ $${orderPrice.toFixed(3)}... executing in 3s`, 'info');
+    addLog('buy', `ORDER: ${side.toUpperCase()} $${amount.toFixed(2)} @ $${orderPrice.toFixed(3)} (pending 3s)`);
 
     // 3-second delay to simulate order execution
     setTimeout(() => {
@@ -596,6 +628,7 @@ function placeTrade() {
             renderBalance();
             const slippagePct = (slippage * 100).toFixed(1);
             showToast(`Trade rejected - unfavorable slippage ${slippagePct}% (>10%). Price: $${orderPrice.toFixed(3)} → $${execPrice.toFixed(3)}. Refunded.`, 'error');
+            addLog('reject', `BUY REJECTED: Slippage ${slippagePct}% > 10%. Price: $${orderPrice.toFixed(3)} → $${execPrice.toFixed(3)}. $${amount.toFixed(2)} refunded.`);
             restoreBtn();
             return;
         }
@@ -608,6 +641,7 @@ function placeTrade() {
         renderPositions();
         const slippagePct = (slippage * 100).toFixed(1);
         showToast(`Filled ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)} (slippage: ${slippagePct}%)`, 'success');
+        addLog('buy', `FILLED: ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)} | Cost: $${amount.toFixed(2)} | Slippage: ${slippagePct}%`);
         restoreBtn();
     }, 3000);
 }
@@ -655,6 +689,7 @@ function sellPosition(positionId) {
         if (slippage > SLIPPAGE_TOLERANCE) {
             const slippagePct = (slippage * 100).toFixed(1);
             showToast(`Sell rejected - unfavorable slippage ${slippagePct}% (>10%). Price: $${orderPrice.toFixed(3)} → $${sellPrice.toFixed(3)}. Position kept.`, 'error');
+            addLog('reject', `SELL REJECTED: Slippage ${slippagePct}% > 10%. Price: $${orderPrice.toFixed(3)} → $${sellPrice.toFixed(3)}. Position kept.`);
             renderPositions();
             return;
         }
@@ -685,6 +720,7 @@ function sellPosition(positionId) {
         const slippagePct = (slippage * 100).toFixed(1);
         showToast(`Sold ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)} (slippage: ${slippagePct}%), P&L: ${sign}$${pnl.toFixed(2)}`,
             pnl >= 0 ? 'success' : 'error');
+        addLog('sell', `SOLD: ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)} | Proceeds: $${proceeds.toFixed(2)} | P&L: ${sign}$${pnl.toFixed(2)} | Slippage: ${slippagePct}%`);
     }, 3000);
 }
 
