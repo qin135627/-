@@ -561,10 +561,10 @@ function placeTrade() {
 
     const btn = $('place-trade-btn');
     btn.disabled = true;
-    btn.textContent = 'Executing (5s)...';
+    btn.textContent = 'Executing (3s)...';
     btn.classList.add('trade-pending');
 
-    showToast(`Order pending @ $${orderPrice.toFixed(3)}... executing in 5s`, 'info');
+    showToast(`Order pending @ $${orderPrice.toFixed(3)}... executing in 3s`, 'info');
 
     // 3-second delay to simulate order execution
     setTimeout(() => {
@@ -586,14 +586,16 @@ function placeTrade() {
             return;
         }
 
-        // Check slippage: if price moved more than 10% from order time, reject
-        const slippage = Math.abs(execPrice - orderPrice) / orderPrice;
+        // Slippage check: only reject if UNFAVORABLE slippage > 10%
+        // For buying: unfavorable = price went UP (you get fewer shares)
+        // If price went DOWN (you get MORE shares), that's favorable - allow it
+        const slippage = (execPrice - orderPrice) / orderPrice; // positive = unfavorable for buyer
         if (slippage > SLIPPAGE_TOLERANCE) {
-            // Refund and reject the order
+            // Unfavorable slippage too high - refund
             state.balance += amount;
             renderBalance();
             const slippagePct = (slippage * 100).toFixed(1);
-            showToast(`Trade rejected - slippage ${slippagePct}% (>10%). Order: $${orderPrice.toFixed(3)} → Now: $${execPrice.toFixed(3)}. Refunded.`, 'error');
+            showToast(`Trade rejected - unfavorable slippage ${slippagePct}% (>10%). Price: $${orderPrice.toFixed(3)} → $${execPrice.toFixed(3)}. Refunded.`, 'error');
             restoreBtn();
             return;
         }
@@ -607,7 +609,7 @@ function placeTrade() {
         const slippagePct = (slippage * 100).toFixed(1);
         showToast(`Filled ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)} (slippage: ${slippagePct}%)`, 'success');
         restoreBtn();
-    }, 5000);
+    }, 3000);
 }
 
 // Sell a position at current Polymarket midpoint price
@@ -625,7 +627,7 @@ function sellPosition(positionId) {
     const sellBtns = document.querySelectorAll('.sell-btn');
     sellBtns.forEach(btn => { btn.disabled = true; btn.textContent = 'Selling...'; });
 
-    showToast(`Selling @ $${orderPrice.toFixed(3)}... executing in 5s`, 'info');
+    showToast(`Selling @ $${orderPrice.toFixed(3)}... executing in 3s`, 'info');
 
     // 3-second delay
     setTimeout(() => {
@@ -646,11 +648,13 @@ function sellPosition(positionId) {
             return;
         }
 
-        // Check slippage: if price moved more than 10% from order time, reject
-        const slippage = Math.abs(sellPrice - orderPrice) / orderPrice;
+        // Slippage check: only reject if UNFAVORABLE slippage > 10%
+        // For selling: unfavorable = price went DOWN (you get less money)
+        // If price went UP (you get MORE money), that's favorable - allow it
+        const slippage = (orderPrice - sellPrice) / orderPrice; // positive = unfavorable for seller
         if (slippage > SLIPPAGE_TOLERANCE) {
             const slippagePct = (slippage * 100).toFixed(1);
-            showToast(`Sell rejected - slippage ${slippagePct}% (>10%). Order: $${orderPrice.toFixed(3)} → Now: $${sellPrice.toFixed(3)}. Position kept.`, 'error');
+            showToast(`Sell rejected - unfavorable slippage ${slippagePct}% (>10%). Price: $${orderPrice.toFixed(3)} → $${sellPrice.toFixed(3)}. Position kept.`, 'error');
             renderPositions();
             return;
         }
@@ -681,7 +685,7 @@ function sellPosition(positionId) {
         const slippagePct = (slippage * 100).toFixed(1);
         showToast(`Sold ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)} (slippage: ${slippagePct}%), P&L: ${sign}$${pnl.toFixed(2)}`,
             pnl >= 0 ? 'success' : 'error');
-    }, 5000);
+    }, 3000);
 }
 
 // ============ RENDERING ============
