@@ -542,6 +542,8 @@ function stopAllTimers() {
 }
 
 // ============ PAPER TRADING ============
+const SLIPPAGE_TOLERANCE = 0.10; // 10% max slippage
+
 function placeTrade() {
     if (!state.marketActive) return showToast('No active market', 'error');
     if (state.priceYes === null) return showToast('Waiting for price data...', 'error');
@@ -554,35 +556,57 @@ function placeTrade() {
     renderBalance();
 
     const side = state.currentSide;
+    // Capture price at order time for slippage check
+    const orderPrice = side === 'up' ? state.priceYes : state.priceNo;
+
     const btn = $('place-trade-btn');
     btn.disabled = true;
     btn.textContent = 'Executing (3s)...';
     btn.classList.add('trade-pending');
 
-    showToast(`Order pending... executing in 3s`, 'info');
+    showToast(`Order pending @ $${orderPrice.toFixed(3)}... executing in 3s`, 'info');
 
     // 3-second delay to simulate order execution
     setTimeout(() => {
         // Use the CURRENT price at execution time (price may have moved!)
         const execPrice = side === 'up' ? state.priceYes : state.priceNo;
+
+        const restoreBtn = () => {
+            btn.disabled = false;
+            btn.classList.remove('trade-pending');
+            btn.innerHTML = side === 'up' ? 'Buy UP &#9650;' : 'Buy DOWN &#9660;';
+        };
+
         if (!execPrice || execPrice <= 0) {
             // Refund if no price available
             state.balance += amount;
             renderBalance();
             showToast('Execution failed - no price. Refunded.', 'error');
-        } else {
-            const shares = amount / execPrice;
-            state.positions.push({
-                id: Date.now() + '-' + Math.floor(Math.random() * 10000),
-                side, shares, price: execPrice, cost: amount, timestamp: Date.now(),
-            });
-            renderPositions();
-            showToast(`Filled ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)}`, 'success');
+            restoreBtn();
+            return;
         }
 
-        btn.disabled = false;
-        btn.classList.remove('trade-pending');
-        btn.innerHTML = side === 'up' ? 'Buy UP &#9650;' : 'Buy DOWN &#9660;';
+        // Check slippage: if price moved more than 10% from order time, reject
+        const slippage = Math.abs(execPrice - orderPrice) / orderPrice;
+        if (slippage > SLIPPAGE_TOLERANCE) {
+            // Refund and reject the order
+            state.balance += amount;
+            renderBalance();
+            const slippagePct = (slippage * 100).toFixed(1);
+            showToast(`Trade rejected - slippage ${slippagePct}% (>10%). Order: $${orderPrice.toFixed(3)} → Now: $${execPrice.toFixed(3)}. Refunded.`, 'error');
+            restoreBtn();
+            return;
+        }
+
+        const shares = amount / execPrice;
+        state.positions.push({
+            id: Date.now() + '-' + Math.floor(Math.random() * 10000),
+            side, shares, price: execPrice, cost: amount, timestamp: Date.now(),
+        });
+        renderPositions();
+        const slippagePct = (slippage * 100).toFixed(1);
+        showToast(`Filled ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)} (slippage: ${slippagePct}%)`, 'success');
+        restoreBtn();
     }, 3000);
 }
 
@@ -594,11 +618,14 @@ function sellPosition(positionId) {
 
     if (state.priceYes === null) return showToast('Waiting for price data...', 'error');
 
+    // Capture price at order time for slippage check
+    const orderPrice = pos.side === 'up' ? state.priceYes : state.priceNo;
+
     // Disable the sell button
     const sellBtns = document.querySelectorAll('.sell-btn');
     sellBtns.forEach(btn => { btn.disabled = true; btn.textContent = 'Selling...'; });
 
-    showToast(`Selling... executing in 3s`, 'info');
+    showToast(`Selling @ $${orderPrice.toFixed(3)}... executing in 3s`, 'info');
 
     // 3-second delay
     setTimeout(() => {
@@ -612,6 +639,22 @@ function sellPosition(positionId) {
 
         // Use CURRENT price at execution time
         const sellPrice = pos.side === 'up' ? state.priceYes : state.priceNo;
+
+        if (!sellPrice || sellPrice <= 0) {
+            showToast('Sell failed - no price. Position kept.', 'error');
+            renderPositions();
+            return;
+        }
+
+        // Check slippage: if price moved more than 10% from order time, reject
+        const slippage = Math.abs(sellPrice - orderPrice) / orderPrice;
+        if (slippage > SLIPPAGE_TOLERANCE) {
+            const slippagePct = (slippage * 100).toFixed(1);
+            showToast(`Sell rejected - slippage ${slippagePct}% (>10%). Order: $${orderPrice.toFixed(3)} → Now: $${sellPrice.toFixed(3)}. Position kept.`, 'error');
+            renderPositions();
+            return;
+        }
+
         const proceeds = pos.shares * sellPrice;
         const pnl = proceeds - pos.cost;
 
@@ -635,7 +678,8 @@ function sellPosition(positionId) {
         renderStats();
 
         const sign = pnl >= 0 ? '+' : '';
-        showToast(`Sold ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)}, P&L: ${sign}$${pnl.toFixed(2)}`,
+        const slippagePct = (slippage * 100).toFixed(1);
+        showToast(`Sold ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)} (slippage: ${slippagePct}%), P&L: ${sign}$${pnl.toFixed(2)}`,
             pnl >= 0 ? 'success' : 'error');
     }, 3000);
 }
