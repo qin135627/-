@@ -561,10 +561,10 @@ function placeTrade() {
 
     const btn = $('place-trade-btn');
     btn.disabled = true;
-    btn.textContent = 'Executing (3s)...';
+    btn.textContent = 'Executing (5s)...';
     btn.classList.add('trade-pending');
 
-    showToast(`Order pending @ $${orderPrice.toFixed(3)}... executing in 3s`, 'info');
+    showToast(`Order pending @ $${orderPrice.toFixed(3)}... executing in 5s`, 'info');
 
     // 3-second delay to simulate order execution
     setTimeout(() => {
@@ -607,7 +607,7 @@ function placeTrade() {
         const slippagePct = (slippage * 100).toFixed(1);
         showToast(`Filled ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)} (slippage: ${slippagePct}%)`, 'success');
         restoreBtn();
-    }, 3000);
+    }, 5000);
 }
 
 // Sell a position at current Polymarket midpoint price
@@ -625,7 +625,7 @@ function sellPosition(positionId) {
     const sellBtns = document.querySelectorAll('.sell-btn');
     sellBtns.forEach(btn => { btn.disabled = true; btn.textContent = 'Selling...'; });
 
-    showToast(`Selling @ $${orderPrice.toFixed(3)}... executing in 3s`, 'info');
+    showToast(`Selling @ $${orderPrice.toFixed(3)}... executing in 5s`, 'info');
 
     // 3-second delay
     setTimeout(() => {
@@ -681,7 +681,7 @@ function sellPosition(positionId) {
         const slippagePct = (slippage * 100).toFixed(1);
         showToast(`Sold ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)} (slippage: ${slippagePct}%), P&L: ${sign}$${pnl.toFixed(2)}`,
             pnl >= 0 ? 'success' : 'error');
-    }, 3000);
+    }, 5000);
 }
 
 // ============ RENDERING ============
