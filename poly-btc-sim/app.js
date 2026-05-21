@@ -16,7 +16,84 @@ const CONFIG = {
     REFRESH_ODDS_MS: 2000,
     REFRESH_PRICE_MS: 2000,
     SEARCH_RETRY_MS: 5000,
+    // Dynamic taker fee config (Polymarket-style)
+    // Fee is highest (~3.12%) at 50% odds, decreasing toward 0%/100%
+    FEE_MAX_RATE: 0.0312, // peak fee rate at 50% odds
 };
+
+// ============ DYNAMIC TAKER FEE ============
+// Polymarket uses a dynamic fee: fee = price * (1 - price) * FEE_FACTOR
+// At price=0.50: fee = 0.50 * 0.50 * 0.1248 = 0.0312 (3.12%)
+// At price=0.90: fee = 0.90 * 0.10 * 0.1248 = 0.01123 (1.12%)
+// At price=0.95: fee = 0.95 * 0.05 * 0.1248 = 0.00593 (0.59%)
+const FEE_FACTOR = 0.1248; // calibrated so max fee at 50% = ~3.12%
+
+function calculateTakerFee(price, amount) {
+    // price: the execution price (0 to 1)
+    // amount: USD amount of the trade
+    // Returns fee in USD
+    const feeRate = price * (1 - price) * FEE_FACTOR;
+    return amount * feeRate;
+}
+
+function getFeeRate(price) {
+    // Returns the fee rate as a percentage for display
+    return price * (1 - price) * FEE_FACTOR * 100;
+}
+
+// ============ LOCALSTORAGE PERSISTENCE ============
+const STORAGE_KEY = 'polybtc_state';
+
+function saveState() {
+    try {
+        const toSave = {
+            balance: state.balance,
+            history: state.history,
+            totalTrades: state.totalTrades,
+            wins: state.wins,
+            totalPnl: state.totalPnl,
+            bestTrade: state.bestTrade,
+            totalFeesPaid: state.totalFeesPaid,
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+    } catch (e) {
+        console.log('[PolyBTC] Failed to save state:', e.message);
+    }
+}
+
+function loadState() {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        if (saved.balance !== undefined) state.balance = saved.balance;
+        if (saved.history) state.history = saved.history;
+        if (saved.totalTrades !== undefined) state.totalTrades = saved.totalTrades;
+        if (saved.wins !== undefined) state.wins = saved.wins;
+        if (saved.totalPnl !== undefined) state.totalPnl = saved.totalPnl;
+        if (saved.bestTrade !== undefined) state.bestTrade = saved.bestTrade;
+        if (saved.totalFeesPaid !== undefined) state.totalFeesPaid = saved.totalFeesPaid;
+        console.log('[PolyBTC] State restored from localStorage');
+    } catch (e) {
+        console.log('[PolyBTC] Failed to load state:', e.message);
+    }
+}
+
+function resetState() {
+    state.balance = 1000;
+    state.history = [];
+    state.totalTrades = 0;
+    state.wins = 0;
+    state.totalPnl = 0;
+    state.bestTrade = 0;
+    state.totalFeesPaid = 0;
+    saveState();
+    renderBalance();
+    renderHistory();
+    renderStats();
+    showToast('All records cleared. Balance reset to $1,000.', 'info');
+    addLog('connect', 'Account RESET to $1,000');
+}
 
 // ============ STATE ============
 const state = {
@@ -27,6 +104,7 @@ const state = {
     wins: 0,
     totalPnl: 0,
     bestTrade: 0,
+    totalFeesPaid: 0,
     market: null,
     slug: null,
     tokenIdYes: null,
@@ -543,6 +621,7 @@ function resolveMarket() {
         state.history.push({
             side: pos.side, cost: pos.cost, shares: pos.shares,
             price: pos.price, pnl, won, outcome,
+            fee: pos.fee || 0, buyFee: pos.fee || 0, sellFee: 0,
             timestamp: Date.now(), question: state.question,
         });
         state.totalTrades++;
@@ -554,6 +633,7 @@ function resolveMarket() {
     renderBalance();
     renderHistory();
     renderStats();
+    saveState();
 
     if (state.positions.length > 0) {
         addLog('resolve', `Market ${outcome.toUpperCase()} | BTC: $${(state.btcStartPrice||0).toFixed(0)} → $${(state.btcPrice||0).toFixed(0)} | Round P&L: ${roundPnl >= 0 ? '+' : ''}$${roundPnl.toFixed(2)}`);
@@ -580,23 +660,30 @@ function placeTrade() {
     if (state.priceYes === null) return showToast('Waiting for price data...', 'error');
     const amount = parseFloat($('trade-amount').value);
     if (!amount || amount <= 0) return showToast('Enter a valid amount', 'error');
-    if (amount > state.balance) return showToast('Insufficient balance', 'error');
-
-    // Deduct balance immediately (like Polymarket)
-    state.balance -= amount;
-    renderBalance();
 
     const side = state.currentSide;
-    // Capture price at order time for slippage check
     const orderPrice = side === 'up' ? state.priceYes : state.priceNo;
+
+    // Calculate dynamic taker fee
+    const fee = calculateTakerFee(orderPrice, amount);
+    const totalCost = amount + fee;
+
+    if (totalCost > state.balance) return showToast(`Insufficient balance (need $${totalCost.toFixed(2)} incl. $${fee.toFixed(2)} fee)`, 'error');
+
+    // Deduct balance immediately (amount + fee)
+    state.balance -= totalCost;
+    state.totalFeesPaid += fee;
+    renderBalance();
+    saveState();
 
     const btn = $('place-trade-btn');
     btn.disabled = true;
     btn.textContent = 'Executing (3s)...';
     btn.classList.add('trade-pending');
 
-    showToast(`Order pending @ $${orderPrice.toFixed(3)}... executing in 3s`, 'info');
-    addLog('buy', `ORDER: ${side.toUpperCase()} $${amount.toFixed(2)} @ $${orderPrice.toFixed(3)} (pending 3s)`);
+    const feeRate = getFeeRate(orderPrice);
+    showToast(`Order pending @ $${orderPrice.toFixed(3)} | Fee: $${fee.toFixed(2)} (${feeRate.toFixed(2)}%)... executing in 3s`, 'info');
+    addLog('buy', `ORDER: ${side.toUpperCase()} $${amount.toFixed(2)} @ $${orderPrice.toFixed(3)} | Fee: $${fee.toFixed(2)} (${feeRate.toFixed(2)}%) (pending 3s)`);
 
     // 3-second delay to simulate order execution
     setTimeout(() => {
@@ -610,25 +697,27 @@ function placeTrade() {
         };
 
         if (!execPrice || execPrice <= 0) {
-            // Refund if no price available
-            state.balance += amount;
+            // Refund if no price available (refund amount + fee)
+            state.balance += totalCost;
+            state.totalFeesPaid -= fee;
             renderBalance();
-            showToast('Execution failed - no price. Refunded.', 'error');
+            saveState();
+            showToast('Execution failed - no price. Refunded (incl. fee).', 'error');
             restoreBtn();
             return;
         }
 
         // Slippage check: only reject if UNFAVORABLE slippage > 10%
-        // For buying: unfavorable = price went UP (you get fewer shares)
-        // If price went DOWN (you get MORE shares), that's favorable - allow it
-        const slippage = (execPrice - orderPrice) / orderPrice; // positive = unfavorable for buyer
+        const slippage = (execPrice - orderPrice) / orderPrice;
         if (slippage > SLIPPAGE_TOLERANCE) {
-            // Unfavorable slippage too high - refund
-            state.balance += amount;
+            // Unfavorable slippage too high - refund (amount + fee)
+            state.balance += totalCost;
+            state.totalFeesPaid -= fee;
             renderBalance();
+            saveState();
             const slippagePct = (slippage * 100).toFixed(1);
-            showToast(`Trade rejected - unfavorable slippage ${slippagePct}% (>10%). Price: $${orderPrice.toFixed(3)} → $${execPrice.toFixed(3)}. Refunded.`, 'error');
-            addLog('reject', `BUY REJECTED: Slippage ${slippagePct}% > 10%. Price: $${orderPrice.toFixed(3)} → $${execPrice.toFixed(3)}. $${amount.toFixed(2)} refunded.`);
+            showToast(`Trade rejected - unfavorable slippage ${slippagePct}% (>10%). Refunded (incl. fee).`, 'error');
+            addLog('reject', `BUY REJECTED: Slippage ${slippagePct}% > 10%. $${totalCost.toFixed(2)} refunded (incl. $${fee.toFixed(2)} fee).`);
             restoreBtn();
             return;
         }
@@ -636,12 +725,13 @@ function placeTrade() {
         const shares = amount / execPrice;
         state.positions.push({
             id: Date.now() + '-' + Math.floor(Math.random() * 10000),
-            side, shares, price: execPrice, cost: amount, timestamp: Date.now(),
+            side, shares, price: execPrice, cost: amount, fee, timestamp: Date.now(),
         });
         renderPositions();
         const slippagePct = (slippage * 100).toFixed(1);
-        showToast(`Filled ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)} (slippage: ${slippagePct}%)`, 'success');
-        addLog('buy', `FILLED: ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)} | Cost: $${amount.toFixed(2)} | Slippage: ${slippagePct}%`);
+        showToast(`Filled ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)} | Fee: $${fee.toFixed(2)}`, 'success');
+        addLog('buy', `FILLED: ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)} | Cost: $${amount.toFixed(2)} + Fee: $${fee.toFixed(2)} | Slippage: ${slippagePct}%`);
+        saveState();
         restoreBtn();
     }, 3000);
 }
@@ -657,11 +747,16 @@ function sellPosition(positionId) {
     // Capture price at order time for slippage check
     const orderPrice = pos.side === 'up' ? state.priceYes : state.priceNo;
 
+    // Calculate sell fee upfront
+    const grossProceeds = pos.shares * orderPrice;
+    const sellFee = calculateTakerFee(orderPrice, grossProceeds);
+
     // Disable the sell button
     const sellBtns = document.querySelectorAll('.sell-btn');
     sellBtns.forEach(btn => { btn.disabled = true; btn.textContent = 'Selling...'; });
 
-    showToast(`Selling @ $${orderPrice.toFixed(3)}... executing in 3s`, 'info');
+    const feeRate = getFeeRate(orderPrice);
+    showToast(`Selling @ $${orderPrice.toFixed(3)} | Fee: $${sellFee.toFixed(2)} (${feeRate.toFixed(2)}%)... executing in 3s`, 'info');
 
     // 3-second delay
     setTimeout(() => {
@@ -682,28 +777,32 @@ function sellPosition(positionId) {
             return;
         }
 
-        // Slippage check: only reject if UNFAVORABLE slippage > 10%
-        // For selling: unfavorable = price went DOWN (you get less money)
-        // If price went UP (you get MORE money), that's favorable - allow it
-        const slippage = (orderPrice - sellPrice) / orderPrice; // positive = unfavorable for seller
+        // Slippage check
+        const slippage = (orderPrice - sellPrice) / orderPrice;
         if (slippage > SLIPPAGE_TOLERANCE) {
             const slippagePct = (slippage * 100).toFixed(1);
-            showToast(`Sell rejected - unfavorable slippage ${slippagePct}% (>10%). Price: $${orderPrice.toFixed(3)} → $${sellPrice.toFixed(3)}. Position kept.`, 'error');
-            addLog('reject', `SELL REJECTED: Slippage ${slippagePct}% > 10%. Price: $${orderPrice.toFixed(3)} → $${sellPrice.toFixed(3)}. Position kept.`);
+            showToast(`Sell rejected - unfavorable slippage ${slippagePct}% (>10%). Position kept.`, 'error');
+            addLog('reject', `SELL REJECTED: Slippage ${slippagePct}% > 10%. Position kept.`);
             renderPositions();
             return;
         }
 
-        const proceeds = pos.shares * sellPrice;
+        // Calculate actual fee at execution price
+        const actualGross = pos.shares * sellPrice;
+        const actualFee = calculateTakerFee(sellPrice, actualGross);
+        const proceeds = actualGross - actualFee;
         const pnl = proceeds - pos.cost;
 
         state.balance += proceeds;
+        state.totalFeesPaid += actualFee;
         state.positions.splice(currentIdx, 1);
 
         state.history.push({
             side: pos.side, cost: pos.cost, shares: pos.shares,
             price: pos.price, sellPrice, pnl,
             won: pnl > 0, outcome: 'sold', sold: true,
+            fee: (pos.fee || 0) + actualFee,
+            buyFee: pos.fee || 0, sellFee: actualFee,
             timestamp: Date.now(), question: state.question,
         });
         state.totalTrades++;
@@ -715,12 +814,13 @@ function sellPosition(positionId) {
         renderPositions();
         renderHistory();
         renderStats();
+        saveState();
 
         const sign = pnl >= 0 ? '+' : '';
         const slippagePct = (slippage * 100).toFixed(1);
-        showToast(`Sold ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)} (slippage: ${slippagePct}%), P&L: ${sign}$${pnl.toFixed(2)}`,
+        showToast(`Sold ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)} | Fee: $${actualFee.toFixed(2)} | P&L: ${sign}$${pnl.toFixed(2)}`,
             pnl >= 0 ? 'success' : 'error');
-        addLog('sell', `SOLD: ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)} | Proceeds: $${proceeds.toFixed(2)} | P&L: ${sign}$${pnl.toFixed(2)} | Slippage: ${slippagePct}%`);
+        addLog('sell', `SOLD: ${pos.shares.toFixed(2)} ${pos.side.toUpperCase()} @ $${sellPrice.toFixed(3)} | Gross: $${actualGross.toFixed(2)} - Fee: $${actualFee.toFixed(2)} = Net: $${proceeds.toFixed(2)} | P&L: ${sign}$${pnl.toFixed(2)}`);
     }, 3000);
 }
 
@@ -831,13 +931,24 @@ function renderBalance() {
 function renderTradeSummary() {
     const amount = parseFloat($('trade-amount').value) || 0;
     const price = state.currentSide === 'up' ? (state.priceYes || 0.5) : (state.priceNo || 0.5);
+    const fee = calculateTakerFee(price, amount);
+    const feeRate = getFeeRate(price);
     const shares = price > 0 ? amount / price : 0;
-    const profit = shares - amount;
+    const profit = shares - amount - fee;
     const profitPct = amount > 0 ? (profit / amount) * 100 : 0;
     $('shares-count').textContent = shares.toFixed(2);
     $('avg-price').textContent = `$${price.toFixed(3)}`;
     $('potential-payout').textContent = `$${shares.toFixed(2)}`;
     $('potential-profit').textContent = `+$${profit.toFixed(2)} (${profitPct.toFixed(0)}%)`;
+    // Update fee display
+    const feeEl = $('fee-display');
+    if (feeEl) {
+        feeEl.textContent = `$${fee.toFixed(2)} (${feeRate.toFixed(2)}%)`;
+    }
+    const totalCostEl = $('total-cost');
+    if (totalCostEl) {
+        totalCostEl.textContent = `$${(amount + fee).toFixed(2)}`;
+    }
 }
 
 function renderPositions() {
@@ -896,11 +1007,15 @@ function renderHistory() {
     list.innerHTML = state.history.slice(-20).reverse().map(t => {
         const sideLabel = t.side === 'up' ? '&#9650; UP' : '&#9660; DOWN';
         const tag = t.sold ? '<span style="color:var(--accent); margin-left:6px; font-size:10px;">SOLD</span>' : '';
+        const feeInfo = t.fee ? `<span style="color:var(--text-muted); margin-left:4px; font-size:10px;">fee:$${t.fee.toFixed(2)}</span>` : '';
+        const time = t.timestamp ? new Date(t.timestamp).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit'}) : '';
         return `
         <div class="history-item ${t.won ? 'win' : 'loss'}">
             <div>
                 <span class="history-side">${sideLabel}</span>${tag}
                 <span style="color:var(--text-muted); margin-left:8px; font-size:11px;">$${t.cost.toFixed(0)}</span>
+                ${feeInfo}
+                <span style="color:var(--text-muted); margin-left:6px; font-size:10px;">${time}</span>
             </div>
             <span class="history-pnl">${t.won ? '+' : ''}$${t.pnl.toFixed(2)}</span>
         </div>
@@ -916,6 +1031,8 @@ function renderStats() {
     pnlEl.textContent = `${state.totalPnl >= 0 ? '+' : ''}$${state.totalPnl.toFixed(2)}`;
     pnlEl.style.color = state.totalPnl >= 0 ? 'var(--up-color)' : 'var(--down-color)';
     $('stat-best').textContent = `+$${state.bestTrade.toFixed(2)}`;
+    const feesEl = $('stat-fees');
+    if (feesEl) feesEl.textContent = `$${state.totalFeesPaid.toFixed(2)}`;
 }
 
 function showModal(outcome, pnl, won) {
@@ -1006,9 +1123,19 @@ function setupEvents() {
             placeTrade();
         }
     });
+    // Reset button
+    const resetBtn = $('reset-btn');
+    if (resetBtn) {
+        resetBtn.addEventListener('click', () => {
+            if (confirm('Reset all records and balance to $1,000?')) {
+                resetState();
+            }
+        });
+    }
 }
 
 async function init() {
+    loadState(); // Restore from localStorage
     setupEvents();
     renderBalance();
     renderTradeSummary();
@@ -1017,6 +1144,9 @@ async function init() {
     drawChart();
     window.addEventListener('resize', drawChart);
     showToast('Connecting to Polymarket...', 'info');
+    if (state.history.length > 0) {
+        addLog('connect', `Restored ${state.history.length} trade records from storage. Balance: $${state.balance.toFixed(2)}`);
+    }
     await searchAndConnect();
 }
 

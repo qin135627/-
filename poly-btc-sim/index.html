@@ -118,6 +118,8 @@
                         <div class="trade-summary">
                             <div class="summary-row"><span>Shares</span><span id="shares-count">--</span></div>
                             <div class="summary-row"><span>Poly Price</span><span id="avg-price">--</span></div>
+                            <div class="summary-row fee-row"><span>Taker Fee</span><span id="fee-display">--</span></div>
+                            <div class="summary-row"><span>Total Cost</span><span id="total-cost">--</span></div>
                             <div class="summary-row highlight"><span>Potential Payout</span><span id="potential-payout">--</span></div>
                             <div class="summary-row profit"><span>Potential Profit</span><span id="potential-profit">--</span></div>
                         </div>
@@ -150,7 +152,10 @@
                         <div class="stat-item"><span class="stat-label">Win Rate</span><span class="stat-value" id="stat-winrate">0%</span></div>
                         <div class="stat-item"><span class="stat-label">Total P&L</span><span class="stat-value" id="stat-pnl">$0.00</span></div>
                         <div class="stat-item"><span class="stat-label">Best Trade</span><span class="stat-value" id="stat-best">$0.00</span></div>
+                        <div class="stat-item"><span class="stat-label">Total Fees</span><span class="stat-value" id="stat-fees" style="color:#f59e0b;">$0.00</span></div>
+                        <div class="stat-item"><span class="stat-label">Records</span><span class="stat-value" style="font-size:11px; color:var(--up-color);">Auto-saved</span></div>
                     </div>
+                    <button class="reset-btn" id="reset-btn">Reset All</button>
                 </div>
             </div>
         </main>
