@@ -622,6 +622,7 @@ function resolveMarket() {
             side: pos.side, cost: pos.cost, shares: pos.shares,
             price: pos.price, pnl, won, outcome,
             fee: pos.fee || 0, buyFee: pos.fee || 0, sellFee: 0,
+            note: pos.note || '',
             timestamp: Date.now(), question: state.question,
         });
         state.totalTrades++;
@@ -723,10 +724,13 @@ function placeTrade() {
         }
 
         const shares = amount / execPrice;
+        const tradeNote = ($('trade-note') ? $('trade-note').value.trim() : '') || '';
         state.positions.push({
             id: Date.now() + '-' + Math.floor(Math.random() * 10000),
             side, shares, price: execPrice, cost: amount, fee, timestamp: Date.now(),
+            note: tradeNote,
         });
+        if ($('trade-note')) $('trade-note').value = ''; // clear after trade
         renderPositions();
         const slippagePct = (slippage * 100).toFixed(1);
         showToast(`Filled ${shares.toFixed(2)} ${side.toUpperCase()} @ $${execPrice.toFixed(3)} | Fee: $${fee.toFixed(2)}`, 'success');
@@ -803,6 +807,7 @@ function sellPosition(positionId) {
             won: pnl > 0, outcome: 'sold', sold: true,
             fee: (pos.fee || 0) + actualFee,
             buyFee: pos.fee || 0, sellFee: actualFee,
+            note: pos.note || '',
             timestamp: Date.now(), question: state.question,
         });
         state.totalTrades++;
@@ -1009,6 +1014,7 @@ function renderHistory() {
         const tag = t.sold ? '<span style="color:var(--accent); margin-left:6px; font-size:10px;">SOLD</span>' : '';
         const feeInfo = t.fee ? `<span style="color:var(--text-muted); margin-left:4px; font-size:10px;">fee:$${t.fee.toFixed(2)}</span>` : '';
         const time = t.timestamp ? new Date(t.timestamp).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit'}) : '';
+        const noteHtml = t.note ? `<div style="color:var(--text-muted); font-size:10px; margin-top:2px; font-style:italic; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${t.note.replace(/"/g, '&quot;')}">${t.note}</div>` : '';
         return `
         <div class="history-item ${t.won ? 'win' : 'loss'}">
             <div>
@@ -1016,6 +1022,7 @@ function renderHistory() {
                 <span style="color:var(--text-muted); margin-left:8px; font-size:11px;">$${t.cost.toFixed(0)}</span>
                 ${feeInfo}
                 <span style="color:var(--text-muted); margin-left:6px; font-size:10px;">${time}</span>
+                ${noteHtml}
             </div>
             <span class="history-pnl">${t.won ? '+' : ''}$${t.pnl.toFixed(2)}</span>
         </div>
