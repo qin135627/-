@@ -1191,3 +1191,36 @@ body {
 .log-entry.reject .log-type { color: var(--down-color); }
 .log-entry.resolve .log-type { color: #f59e0b; }
 .log-entry.connect .log-type { color: var(--accent); }
+
+
+
+/* ============ FEE DISPLAY ============ */
+.summary-row.fee-row {
+    color: #f59e0b;
+    font-size: 13px;
+}
+
+.summary-row.fee-row span:last-child {
+    color: #f59e0b;
+    font-weight: 600;
+}
+
+/* ============ RESET BUTTON ============ */
+.reset-btn {
+    margin-top: 16px;
+    width: 100%;
+    padding: 10px;
+    border: 1px solid var(--down-border);
+    border-radius: var(--radius-sm);
+    background: var(--down-bg);
+    color: var(--down-color);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.reset-btn:hover {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: var(--down-color);
+}

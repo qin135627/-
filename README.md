@@ -1,3 +1,28 @@
+---
+
+## PolyBTC - Polymarket BTC 模拟交易器
+
+> 基于 Polymarket 真实数据的 BTC 5分钟/15分钟涨跌预测模拟交易工具
+
+**[点击查看详细使用教程 →](poly-btc-sim/README.md)**
+
+### 快速开始
+
+```powershell
+cd "B:\新建文件夹\poly\--master\poly-btc-sim"
+python -m http.server 8080
+```
+浏览器打开 http://localhost:8080
+
+### 功能
+- 实时 Polymarket 赔率 + Binance BTC 价格
+- Polymarket 动态手续费（最高~3.12%）
+- 交易记录持久化（刷新不丢失）
+- 交易笔记（记录每笔理由）
+- 移动端适配
+
+---
+
 <div align="center" id="trendradar">
 
 <a href="https://github.com/sansan0/TrendRadar" title="TrendRadar">
