@@ -569,7 +569,8 @@ function connectToMarket(md) {
     state.marketStartTime = md.startTime;
     state.marketEndTime = md.endTime;
     state.volume = Math.round(md.volume || 0);
-    state.positions = [];
+    // Keep existing positions when switching market duration (don't clear!)
+    // Positions from previous market that haven't been sold remain active
     state.marketActive = true;
     state.priceYes = md.priceYes !== null ? md.priceYes : 0.5;
     state.priceNo = md.priceNo !== null ? md.priceNo : 0.5;
@@ -612,7 +613,12 @@ function resolveMarket() {
     let roundPnl = 0;
     let roundWon = false;
 
-    state.positions.forEach(pos => {
+    // Only resolve positions that belong to the current market
+    const currentSlug = state.slug;
+    const positionsToResolve = state.positions.filter(p => p.marketSlug === currentSlug);
+    const positionsToKeep = state.positions.filter(p => p.marketSlug !== currentSlug);
+
+    positionsToResolve.forEach(pos => {
         const won = pos.side === outcome;
         const payout = won ? pos.shares : 0;
         const pnl = payout - pos.cost;
@@ -636,10 +642,13 @@ function resolveMarket() {
     renderStats();
     saveState();
 
-    if (state.positions.length > 0) {
+    if (positionsToResolve.length > 0) {
+        // Keep positions from other markets
+        state.positions = positionsToKeep;
         addLog('resolve', `Market ${outcome.toUpperCase()} | BTC: $${(state.btcStartPrice||0).toFixed(0)} → $${(state.btcPrice||0).toFixed(0)} | Round P&L: ${roundPnl >= 0 ? '+' : ''}$${roundPnl.toFixed(2)}`);
         showModal(outcome, roundPnl, roundWon);
     } else {
+        state.positions = positionsToKeep;
         addLog('resolve', `Market ${outcome.toUpperCase()} | BTC: $${(state.btcStartPrice||0).toFixed(0)} → $${(state.btcPrice||0).toFixed(0)} | No positions`);
         showToast(`Resolved: ${outcome.toUpperCase()}. Finding next market...`, 'info');
         setTimeout(searchAndConnect, 2000);
@@ -729,6 +738,8 @@ function placeTrade() {
             id: Date.now() + '-' + Math.floor(Math.random() * 10000),
             side, shares, price: execPrice, cost: amount, fee, timestamp: Date.now(),
             note: tradeNote,
+            marketSlug: state.slug,
+            marketDuration: state.marketDuration,
         });
         if ($('trade-note')) $('trade-note').value = ''; // clear after trade
         renderPositions();
@@ -1102,7 +1113,7 @@ function setupEvents() {
     $('place-trade-btn').addEventListener('click', placeTrade);
     $('modal-close-btn').addEventListener('click', () => {
         $('modal-overlay').style.display = 'none';
-        state.positions = [];
+        state.positions = []; // resolved positions already settled in resolveMarket
         renderPositions();
         searchAndConnect();
     });
